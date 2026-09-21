@@ -1,0 +1,45 @@
+name: Build and Release Debian Package
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - src/VERSION
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install packaging dependencies
+        run: sudo apt-get update && sudo apt-get install -y dpkg-dev
+
+      - name: Build .deb package
+        run: ./build-deb.sh
+
+      - name: Create and push version tag
+        id: version
+        run: |
+          VERSION=$(tr -d '[:space:]' < src/VERSION)
+          TAG="v${VERSION}"
+
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG" "$GITHUB_SHA"
+          git push origin "$TAG"
+
+      - name: Create Release and Upload .deb
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          files: ./*.deb
+          generate_release_notes: true
