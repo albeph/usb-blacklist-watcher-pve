@@ -23,18 +23,11 @@ usb-blacklist-watcher-pve/
 │           └── blacklist.conf                  # State file with commented header (empty by default)
 │
 ├── build/                                      # Temporary staging directory for dpkg-deb (ignored by Git)
-├── usb-blacklist-watcher_1.0.0_all.deb         # Initial version (legacy name)
-├── usb-blacklist-watcher_1.0.1_all.deb         # Fix: inotify on pmxcfs symlinks
-├── usb-blacklist-watcher_1.0.2_all.deb         # Fix: bypass via bus-port passthrough (sysfs)
-├── usb-blacklist-watcher_1.0.3_all.deb         # Optimizations: async debounce, blacklist caching
-├── usb-blacklist-watcher-pve_1.1.0_all.deb     # Project rename to usb-blacklist-watcher-pve
-│
 ├── .git/                                       # Git repository for version tracking
 ├── .gitignore                                  # Build exclusion rules (build/, *.deb, temp files)
 ├── build-deb.sh                                # Build script with auto-versioning from DEBIAN/control
 ├── README.md                                   # Operational documentation (build, install, usage, purge)
-├── RELAZIONE_PROGETTO.md                       # Technical report: history and design decisions for each version
-└── STRUTTURA.md                                # This file: detailed project tree
+└── STRUCTURE.md                                # This file: detailed project tree
 ```
 
 ---
