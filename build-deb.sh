@@ -18,6 +18,7 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly VERSION_FILE="${SCRIPT_DIR}/VERSION"
 readonly SRC_DIR="${SCRIPT_DIR}/src"
 readonly BUILD_DIR="${SCRIPT_DIR}/build"
 readonly STAGING_DIR="${BUILD_DIR}/usb-blacklist-watcher-pve"
@@ -32,15 +33,18 @@ error()   { echo "  [build] ERROR: $*" >&2; }
 section() { echo ""; echo "── $* ─────────────────────────────────────────"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# READ VERSION FROM CONTROL FILE
+# READ VERSION
 # ─────────────────────────────────────────────────────────────────────────────
 
 get_version() {
-    if [ ! -f "${CONTROL_FILE}" ]; then
-        error "Control file not found: ${CONTROL_FILE}"
+    if [ -f "${VERSION_FILE}" ]; then
+        tr -d '[:space:]' < "${VERSION_FILE}"
+    elif [ -f "${CONTROL_FILE}" ]; then
+        grep -E '^Version:' "${CONTROL_FILE}" | awk '{print $2}' | tr -d '[:space:]'
+    else
+        error "Neither VERSION file (${VERSION_FILE}) nor control file (${CONTROL_FILE}) found."
         exit 1
     fi
-    grep -E '^Version:' "${CONTROL_FILE}" | awk '{print $2}' | tr -d '[:space:]'
 }
 
 get_package_name() {
@@ -80,6 +84,30 @@ prepare_staging() {
     mkdir -p "${STAGING_DIR}"
     cp -a "${SRC_DIR}/." "${STAGING_DIR}/"
     info "Staging prepared successfully"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# SYNCHRONIZE VERSION
+# ─────────────────────────────────────────────────────────────────────────────
+
+sync_version() {
+    section "Synchronize version"
+    local version
+    version=$(get_version)
+
+    if [ -z "${version}" ]; then
+        error "Version string is empty."
+        exit 1
+    fi
+
+    # Synchronize control files with VERSION
+    if [ -f "${CONTROL_FILE}" ]; then
+        sed -i -E "s/^Version:.*/Version: ${version}/" "${CONTROL_FILE}"
+    fi
+    if [ -f "${STAGING_DIR}/DEBIAN/control" ]; then
+        sed -i -E "s/^Version:.*/Version: ${version}/" "${STAGING_DIR}/DEBIAN/control"
+    fi
+    info "Version synchronized: ${version}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -180,6 +208,7 @@ main() {
 
     check_build_deps
     prepare_staging
+    sync_version
     set_permissions
     build_deb
     verify_deb

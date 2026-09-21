@@ -33,7 +33,7 @@ chmod +x build-deb.sh
 
 This generates `usb-blacklist-watcher-pve_1.1.0_all.deb` in the current directory.
 
-To update the version before building, modify the `Version:` line in `src/DEBIAN/control` — the resulting `.deb` filename will be updated automatically.
+To update the version before building, modify the `VERSION` file in the repository root — `build-deb.sh` will synchronize `src/DEBIAN/control` and name the resulting `.deb` package automatically.
 
 ---
 
@@ -173,10 +173,10 @@ This removes `/etc/usb-blacklist-watcher-pve/` and all its contents.
 
 ## Versioning
 
-The package version is defined in `src/DEBIAN/control`:
+The package version is defined in the `VERSION` file in the repository root:
 
 ```
-Version: 1.1.0
+1.1.0
 ```
 
-Update this value before running `./build-deb.sh` to produce a package with the new version in the filename.
+Update this file before running `./build-deb.sh`. The build script will automatically synchronize the version into `src/DEBIAN/control` and produce a package with the new version in the filename.
