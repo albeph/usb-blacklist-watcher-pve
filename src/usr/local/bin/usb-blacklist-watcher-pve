@@ -1,0 +1,329 @@
+#!/bin/bash
+# usb-blacklist-watcher-pve — Watcher systemd per la blacklist USB su Proxmox VE
+#
+# Monitora via inotify la directory delle configurazioni VM QEMU e il file
+# di blacklist. Rimuove con `qm set <VMID> --delete usbN` qualsiasi device
+# USB in blacklist trovato nei conf VM, sia che la VM sia accesa (hot-unplug)
+# sia spenta (edit statico).
+#
+# La blacklist viene riletta dal file ad ogni enforcement: le modifiche fatte
+# con usb-blacklist-select o manualmente diventano attive immediatamente,
+# senza bisogno di riavviare il servizio.
+
+set -euo pipefail
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURAZIONE
+# ─────────────────────────────────────────────────────────────────────────────
+
+readonly BLACKLIST_FILE="/etc/usb-blacklist-watcher-pve/blacklist.conf"
+readonly QEMU_DIR="/etc/pve/qemu-server"
+readonly DEBOUNCE_SECONDS="0.3"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILITY
+# ─────────────────────────────────────────────────────────────────────────────
+
+log() {
+    local level="${1}"; shift
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [${level}] $*"
+}
+
+log_info()  { log "INFO " "$*"; }
+log_warn()  { log "WARN " "$*"; }
+log_error() { log "ERROR" "$*"; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# LETTURA BLACKLIST
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Legge la blacklist dal file e scrive su stdout un VENDOR:PRODUCT per riga.
+# Ignora righe vuote e commenti (#). Se il file non esiste, non produce output
+# (blacklist vuota → nessun enforcement).
+read_blacklist() {
+    if [ ! -f "${BLACKLIST_FILE}" ]; then
+        return 0
+    fi
+    grep -v '^\s*#' "${BLACKLIST_FILE}" \
+        | grep -v '^\s*$' \
+        | awk '{print tolower($1)}' \
+        | grep -E '^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$' \
+        || true
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONTROLLO BLACKLIST SUI CONF VM
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Ritorna le chiavi usbN (es. "usb0", "usb1") presenti nel conf che
+# contengono un device in blacklist, una per riga.
+#
+# FIX 1+5: accetta la blacklist già letta come secondo argomento opzionale,
+# evitando di rileggere il file per ogni VM durante enforce_all_confs.
+# Se non fornita la legge in autonomia (chiamate singole da enforce_conf).
+#
+# Argomenti:
+#   $1 — percorso assoluto del file .conf
+#   $2 — (opzionale) contenuto della blacklist già letto
+get_blacklisted_usb_keys() {
+    local conf_file="${1}"
+    local blacklist="${2:-$(read_blacklist)}"
+
+    if [ -z "${blacklist}" ]; then
+        return 0
+    fi
+
+    # Analizza ogni riga usbN: nel conf e ne risolve l'ID effettivo.
+    # Gestisce sia il formato VENDOR:PRODUCT che il formato bus-port (es. 1-4.2),
+    # risolvendo quest'ultimo tramite sysfs in tempo reale.
+    local line
+    while IFS= read -r line; do
+        local key
+        key=$(echo "${line}" | grep -oP "^usb\d+" || true)
+        [ -z "${key}" ] && continue
+
+        local host_val
+        host_val=$(echo "${line}" | grep -oP "host=\K[^, ]+" || true)
+        [ -z "${host_val}" ] && continue
+
+        local actual_id=""
+        if [[ "${host_val}" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
+            # Formato VENDOR:PRODUCT — usa direttamente
+            actual_id="${host_val,,}"
+        elif [[ "${host_val}" =~ ^[0-9]+-[0-9]+(\.[0-9]+)*$ ]]; then
+            # Formato bus-port (es. 1-4.2) — risolve via sysfs
+            local sysfs_dir="/sys/bus/usb/devices/${host_val}"
+            if [ -f "${sysfs_dir}/idVendor" ] && [ -f "${sysfs_dir}/idProduct" ]; then
+                local vendor product
+                vendor=$(cat "${sysfs_dir}/idVendor")
+                product=$(cat "${sysfs_dir}/idProduct")
+                actual_id="${vendor,,}:${product,,}"
+            else
+                log_warn "bus-port '${host_val}' non trovata in sysfs — device scollegato?"
+            fi
+        fi
+
+        [ -z "${actual_id}" ] && continue
+
+        # Se l'ID effettivo (vendor:product) è in blacklist, emette la chiave
+        if echo "${blacklist}" | grep -qi "^${actual_id}$"; then
+            echo "${key}"
+        fi
+    done < <(grep -iP "^usb\d+:" "${conf_file}" || true)
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# AZIONE — RIMOZIONE ENTRY USB
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Applica l'enforcement su un singolo conf VM.
+#
+# FIX 1: get_blacklisted_usb_keys chiamata UNA SOLA VOLTA (eliminata
+#         la doppia chiamata precedente tramite conf_has_blacklisted_device).
+# FIX 3: exit code di qm catturato correttamente senza pipe.
+# FIX 5: accetta la blacklist pre-letta come secondo argomento opzionale.
+#
+# Argomenti:
+#   $1 — VMID (numero intero, es. 100)
+#   $2 — (opzionale) contenuto della blacklist già letto
+enforce_conf() {
+    local vmid="${1}"
+    local blacklist="${2:-$(read_blacklist)}"
+    local conf_file="${QEMU_DIR}/${vmid}.conf"
+
+    if [ ! -f "${conf_file}" ]; then
+        log_warn "enforce_conf: file non trovato per VMID ${vmid}: ${conf_file}"
+        return 0
+    fi
+
+    # FIX 1: una sola chiamata — il risultato serve sia per il check che per l'azione
+    local keys
+    keys=$(get_blacklisted_usb_keys "${conf_file}" "${blacklist}" | sort -u)
+
+    [ -z "${keys}" ] && return 0  # nessun device in blacklist → niente da fare
+
+    local key
+    while IFS= read -r key; do
+        [ -z "${key}" ] && continue
+
+        local current_value
+        current_value=$(grep -iP "^${key}:" "${conf_file}" | head -1 | cut -d' ' -f2- || echo "?")
+
+        log_info "VM ${vmid}: rimozione device USB in blacklist — chiave='${key}' valore='${current_value}'"
+
+        if command -v qm &>/dev/null; then
+            # FIX 3: cattura output e exit code senza pipe (che ingoia l'exit code)
+            local qm_output qm_rc
+            qm_output=$(qm set "${vmid}" --delete "${key}" 2>&1) && qm_rc=0 || qm_rc=$?
+            [ -n "${qm_output}" ] && log_info "  qm output: ${qm_output}"
+            if [ "${qm_rc}" -eq 0 ]; then
+                log_info "VM ${vmid}: '${key}' rimosso con successo."
+            else
+                log_error "VM ${vmid}: errore (rc=${qm_rc}) rimuovendo '${key}'. Verifica: qm set ${vmid} --delete ${key}"
+            fi
+        else
+            log_error "Comando 'qm' non trovato nel PATH — impossibile rimuovere '${key}' dalla VM ${vmid}."
+            log_error "Assicurarsi che il pacchetto Proxmox VE sia installato e che qm sia raggiungibile."
+        fi
+    done <<< "${keys}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ENFORCEMENT SU TUTTI I CONF
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Scansiona tutti i file *.conf nella QEMU_DIR e applica enforce_conf.
+#
+# FIX 5: legge la blacklist UNA SOLA VOLTA e la passa a ogni enforce_conf,
+#         evitando N letture di file (una per VM) come accadeva prima.
+enforce_all_confs() {
+    if [ ! -d "${QEMU_DIR}" ]; then
+        log_warn "Directory QEMU non trovata: ${QEMU_DIR} — pve-cluster montato?"
+        return 0
+    fi
+
+    # Lettura unica della blacklist per l'intero ciclo
+    local blacklist
+    blacklist=$(read_blacklist)
+
+    if [ -z "${blacklist}" ]; then
+        log_info "Blacklist vuota — nessun enforcement necessario."
+        return 0
+    fi
+
+    local conf_file vmid
+    local count=0
+
+    for conf_file in "${QEMU_DIR}/"*.conf; do
+        [ -f "${conf_file}" ] || continue
+        vmid=$(basename "${conf_file}" .conf)
+        if [[ ! "${vmid}" =~ ^[0-9]+$ ]]; then
+            log_warn "Skipping file con nome non numerico: ${conf_file}"
+            continue
+        fi
+        # FIX 5: passa la blacklist già letta (non la rilegge per ogni VM)
+        enforce_conf "${vmid}" "${blacklist}"
+        (( count++ )) || true
+    done
+
+    log_info "Enforcement completato su ${count} VM."
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DEBOUNCE — Scheduling con cancellazione job precedente
+# ─────────────────────────────────────────────────────────────────────────────
+
+# FIX 2: debounce vero — il job precedente viene killato prima di schedularne
+# uno nuovo. Quattro eventi rapidi generano un solo enforcement, lanciato
+# DEBOUNCE_SECONDS dopo l'ultimo evento ricevuto.
+
+# PID dell'ultimo job di enforcement globale pendente
+PENDING_ALL_PID=""
+
+# Mappa vmid → PID del job pendente per quella specifica VM
+declare -A PENDING_VM_PIDS=()
+
+# Schedula enforce_all_confs con debounce.
+# Se un job è già pendente, lo cancella prima di schedularne uno nuovo.
+schedule_enforce_all() {
+    if [ -n "${PENDING_ALL_PID}" ]; then
+        kill "${PENDING_ALL_PID}" 2>/dev/null || true
+    fi
+    ( sleep "${DEBOUNCE_SECONDS}" && enforce_all_confs ) &
+    PENDING_ALL_PID=$!
+}
+
+# Schedula enforce_conf per una singola VM con debounce.
+# Se un job per questa VM è già pendente, lo cancella prima.
+schedule_enforce_vm() {
+    local vmid="${1}"
+    local prev_pid="${PENDING_VM_PIDS[${vmid}]:-}"
+    if [ -n "${prev_pid}" ]; then
+        kill "${prev_pid}" 2>/dev/null || true
+    fi
+    ( sleep "${DEBOUNCE_SECONDS}" && enforce_conf "${vmid}" ) &
+    PENDING_VM_PIDS["${vmid}"]=$!
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# WATCHER — LOOP INOTIFY
+# ─────────────────────────────────────────────────────────────────────────────
+
+watch_loop() {
+    if ! command -v inotifywait &>/dev/null; then
+        log_error "Comando 'inotifywait' non trovato. Installare inotify-tools."
+        exit 1
+    fi
+
+    if [ ! -d "${QEMU_DIR}" ]; then
+        log_warn "Directory QEMU non trovata: ${QEMU_DIR}. Attendo che diventi disponibile..."
+        while [ ! -d "${QEMU_DIR}" ]; do
+            sleep 5
+        done
+        log_info "Directory QEMU rilevata: ${QEMU_DIR}. Avvio il monitoring."
+    fi
+
+    local blacklist_dir
+    blacklist_dir=$(dirname "${BLACKLIST_FILE}")
+
+    log_info "Avvio monitoring inotify su: ${QEMU_DIR}/ e ${blacklist_dir}"
+
+    # NOTA: si usa process substitution < <(...) invece della pipe | while.
+    # Con la pipe il while gira in un subshell e le variabili PENDING_*_PID
+    # non sarebbero persistenti tra le iterazioni, rendendo il debounce inutile.
+    while IFS=' ' read -r filepath event; do
+
+        # ── Modifica al file di blacklist ────────────────────────────────────
+        if [ "${filepath}" = "${BLACKLIST_FILE}" ]; then
+            log_info "Blacklist modificata (${event}): scheduling enforcement su tutte le VM..."
+            schedule_enforce_all
+            continue
+        fi
+
+        # ── Modifica a un conf VM ────────────────────────────────────────────
+        if [[ "${filepath}" == "${QEMU_DIR}/"*.conf ]]; then
+            local vmid
+            vmid=$(basename "${filepath}" .conf)
+            [[ "${vmid}" =~ ^[0-9]+$ ]] || continue
+            log_info "Modifica rilevata per VM ${vmid} (${event}): scheduling enforcement..."
+            schedule_enforce_vm "${vmid}"
+        fi
+
+    done < <(inotifywait \
+        --monitor \
+        --quiet \
+        --event modify,close_write,create,moved_to \
+        --format '%w%f %e' \
+        "${QEMU_DIR}/" \
+        "${blacklist_dir}")
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+main() {
+    log_info "========================================================"
+    log_info "usb-blacklist-watcher-pve avviato"
+    log_info "  QEMU dir:      ${QEMU_DIR}"
+    log_info "  Blacklist:     ${BLACKLIST_FILE}"
+    log_info "  Debounce:      ${DEBOUNCE_SECONDS}s"
+    log_info "========================================================"
+
+    # Verifica dipendenze fondamentali
+    if ! command -v qm &>/dev/null; then
+        log_warn "Comando 'qm' non trovato nel PATH."
+        log_warn "Il watcher girerà ma non potrà rimuovere USB dalle VM."
+        log_warn "Assicurarsi che Proxmox VE sia installato correttamente."
+    fi
+
+    # Enforcement iniziale al boot del servizio
+    log_info "Enforcement iniziale su tutti i conf VM esistenti..."
+    enforce_all_confs
+
+    # Poi entra nel loop di monitoring continuo
+    log_info "Avvio del monitoring inotify..."
+    watch_loop
+}
+
+main "$@"

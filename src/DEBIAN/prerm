@@ -1,0 +1,56 @@
+#!/bin/bash
+# prerm — eseguito da dpkg PRIMA della rimozione del pacchetto
+set -euo pipefail
+
+SERVICE_NAME="usb-blacklist-watcher-pve.service"
+OLD_SERVICE_NAME="usb-blacklist-watcher.service"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILITY
+# ─────────────────────────────────────────────────────────────────────────────
+
+info() { echo "  [usb-blacklist-watcher-pve] $*"; }
+warn() { echo "  [usb-blacklist-watcher-pve] ATTENZIONE: $*" >&2; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# STOP E DISABILITAZIONE DEL SERVIZIO
+# ─────────────────────────────────────────────────────────────────────────────
+
+stop_service() {
+    if ! command -v systemctl &>/dev/null; then
+        warn "systemctl non trovato — salto lo stop del servizio."
+        return 0
+    fi
+
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        info "Arresto del servizio ${SERVICE_NAME}..."
+        systemctl stop "${SERVICE_NAME}" || warn "Impossibile fermare il servizio."
+    fi
+
+    if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        info "Disabilitazione del servizio ${SERVICE_NAME}..."
+        systemctl disable "${SERVICE_NAME}" || warn "Impossibile disabilitare il servizio."
+    fi
+
+    if systemctl is-active --quiet "${OLD_SERVICE_NAME}" 2>/dev/null; then
+        info "Arresto del vecchio servizio ${OLD_SERVICE_NAME}..."
+        systemctl stop "${OLD_SERVICE_NAME}" || true
+        systemctl disable "${OLD_SERVICE_NAME}" || true
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    remove|upgrade|deconfigure|failed-upgrade)
+        stop_service
+        ;;
+    *)
+        warn "prerm chiamato con action inatteso: '${1:-}'"
+        exit 1
+        ;;
+esac
+
+exit 0

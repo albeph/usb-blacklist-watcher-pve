@@ -1,0 +1,55 @@
+#!/bin/bash
+# postrm — eseguito da dpkg DOPO la rimozione del pacchetto
+set -euo pipefail
+
+BLACKLIST_DIR="/etc/usb-blacklist-watcher-pve"
+OLD_BLACKLIST_DIR="/etc/usb-blacklist-watcher"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILITY
+# ─────────────────────────────────────────────────────────────────────────────
+
+info() { echo "  [usb-blacklist-watcher-pve] $*"; }
+warn() { echo "  [usb-blacklist-watcher-pve] ATTENZIONE: $*" >&2; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    purge)
+        # Solo in caso di purge completa: rimuovi la directory di configurazione
+        # con la blacklist. In caso di semplice "remove" la blacklist viene
+        # conservata per un eventuale reinstall successivo.
+        if [ -d "${BLACKLIST_DIR}" ]; then
+            info "Purge: rimozione della directory di configurazione ${BLACKLIST_DIR}..."
+            rm -rf "${BLACKLIST_DIR}"
+            info "Configurazione rimossa."
+        fi
+        if [ -d "${OLD_BLACKLIST_DIR}" ]; then
+            info "Purge: rimozione della precedente directory di configurazione ${OLD_BLACKLIST_DIR}..."
+            rm -rf "${OLD_BLACKLIST_DIR}"
+        fi
+        # Ricarica i daemon unit dopo la rimozione del file .service
+        if command -v systemctl &>/dev/null; then
+            systemctl daemon-reload || true
+        fi
+        ;;
+    remove)
+        # Rimozione semplice: la blacklist viene preservata in ${BLACKLIST_DIR}.
+        # Ricarica i daemon unit dopo la rimozione del file .service.
+        if command -v systemctl &>/dev/null; then
+            systemctl daemon-reload || true
+        fi
+        info "Configurazione conservata in ${BLACKLIST_DIR} (usa 'apt purge' per rimuoverla)."
+        ;;
+    upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
+        # Niente da fare
+        ;;
+    *)
+        warn "postrm chiamato con action inatteso: '${1:-}'"
+        exit 1
+        ;;
+esac
+
+exit 0

@@ -3,27 +3,26 @@
 ```
 usb-blacklist-watcher/
 │
-├── build/                                      # Staging tree per dpkg-deb --build
-│   └── usb-blacklist-watcher-pve/
-│       │
-│       ├── DEBIAN/                             # Metadati e script del pacchetto Debian
-│       │   ├── control                         # Nome (usb-blacklist-watcher-pve), versione, dipendenze
-│       │   ├── postinst                        # Post-install: crea/migra blacklist.conf, abilita servizio
-│       │   ├── prerm                           # Pre-remove: ferma e disabilita il servizio
-│       │   └── postrm                          # Post-remove: purge rimuove /etc/usb-blacklist-watcher-pve/
-│       │
-│       ├── usr/local/bin/
-│       │   ├── usb-blacklist-select            # Tool CLI interattivo per gestire la blacklist
-│       │   ├── usb-blacklist-watcher-pve        # Daemon watcher (monitoraggio inotify + enforcement)
-│       │   ├── usb-blacklist-select-pve -> ... # Symlink di convenienza a usb-blacklist-select
-│       │   └── usb-blacklist-watcher -> ...    # Symlink di retrocompatibilità a usb-blacklist-watcher-pve
-│       │
-│       └── etc/
-│           ├── systemd/system/
-│           │   └── usb-blacklist-watcher-pve.service # Unit systemd (Restart=always, After=pve-cluster)
-│           └── usb-blacklist-watcher-pve/
-│               └── blacklist.conf              # File di stato con header commentato (default vuoto)
+├── src/                                        # File sorgente del pacchetto Debian
+│   ├── DEBIAN/                             # Metadati e script del pacchetto Debian
+│   │   ├── control                         # Nome (usb-blacklist-watcher-pve), versione, dipendenze
+│   │   ├── postinst                        # Post-install: crea/migra blacklist.conf, abilita servizio
+│   │   ├── prerm                           # Pre-remove: ferma e disabilita il servizio
+│   │   └── postrm                          # Post-remove: purge rimuove /etc/usb-blacklist-watcher-pve/
+│   │
+│   ├── usr/local/bin/
+│   │   ├── usb-blacklist-select            # Tool CLI interattivo per gestire la blacklist
+│   │   ├── usb-blacklist-watcher-pve        # Daemon watcher (monitoraggio inotify + enforcement)
+│   │   ├── usb-blacklist-select-pve -> ... # Symlink di convenienza a usb-blacklist-select
+│   │   └── usb-blacklist-watcher -> ...    # Symlink di retrocompatibilità a usb-blacklist-watcher-pve
+│   │
+│   └── etc/
+│       ├── systemd/system/
+│       │   └── usb-blacklist-watcher-pve.service # Unit systemd (Restart=always, After=pve-cluster)
+│       └── usb-blacklist-watcher-pve/
+│           └── blacklist.conf              # File di stato con header commentato (default vuoto)
 │
+├── build/                                      # Cartella temporanea di staging per dpkg-deb (ignorata da Git)
 ├── usb-blacklist-watcher_1.0.0_all.deb        # Versione iniziale (legacy name)
 ├── usb-blacklist-watcher_1.0.1_all.deb        # Fix: inotify su symlink pmxcfs
 ├── usb-blacklist-watcher_1.0.2_all.deb        # Fix: bypass via passthrough bus-port (sysfs)
@@ -31,7 +30,7 @@ usb-blacklist-watcher/
 ├── usb-blacklist-watcher-pve_1.1.0_all.deb    # Rename progetto a usb-blacklist-watcher-pve
 │
 ├── .git/                                       # Repository Git per tracciamento versioni
-├── .gitignore                                  # Regole di esclusione file di build (*.deb, temp)
+├── .gitignore                                  # Regole di esclusione file di build (build/, *.deb, temp)
 ├── build-deb.sh                                # Script di build con auto-versioning da DEBIAN/control
 ├── README.md                                   # Documentazione operativa (build, install, uso, purge)
 ├── RELAZIONE_PROGETTO.md                       # Relazione tecnica: storia e motivazioni di ogni versione
@@ -42,23 +41,23 @@ usb-blacklist-watcher/
 
 ## File principali — Descrizione sintetica
 
-### `build/usb-blacklist-watcher-pve/DEBIAN/control`
+### `src/DEBIAN/control`
 Metadati del pacchetto Debian. Contiene nome pacchetto (`usb-blacklist-watcher-pve`), versione, architettura (`all`) e le dipendenze
 dichiarate: `bash (>= 4.0)` e `inotify-tools`. Include inoltre `Provides`, `Replaces` e `Conflicts` verso `usb-blacklist-watcher`
 per garantire un upgrade pulito e trasparente. Questo file è anche la **sorgente della versione**
 letta automaticamente da `build-deb.sh` per nominare il file `.deb` in output.
 
-### `build/usb-blacklist-watcher-pve/DEBIAN/postinst`
+### `src/DEBIAN/postinst`
 Eseguito da `dpkg` dopo l'installazione. Gestisce la migrazione automatica di eventuali blacklist esistenti da
 `/etc/usb-blacklist-watcher/blacklist.conf` a `/etc/usb-blacklist-watcher-pve/blacklist.conf`, crea il file se assente,
 imposta i permessi `600 root:root`, ferma eventuali istanze precedenti del vecchio servizio,
 ed esegue `systemctl daemon-reload` e `systemctl enable --now usb-blacklist-watcher-pve.service`.
 
-### `build/usb-blacklist-watcher-pve/DEBIAN/prerm`
+### `src/DEBIAN/prerm`
 Eseguito da `dpkg` prima della rimozione. Ferma (`stop`) e disabilita (`disable`) il servizio
 systemd (`usb-blacklist-watcher-pve.service`, arrestando anche l'eventuale alias legacy) per una rimozione pulita.
 
-### `build/usb-blacklist-watcher-pve/DEBIAN/postrm`
+### `src/DEBIAN/postrm`
 Eseguito da `dpkg` dopo la rimozione. In caso di `purge` rimuove l'intera directory
 `/etc/usb-blacklist-watcher-pve/` (e la vecchia se ancora presente); in caso di `remove` semplice la lascia intatta (la blacklist
 sopravvive per una eventuale reinstallazione).

@@ -1,0 +1,137 @@
+#!/bin/bash
+# postinst — eseguito da dpkg dopo l'installazione/upgrade del pacchetto
+set -euo pipefail
+
+BLACKLIST_DIR="/etc/usb-blacklist-watcher-pve"
+BLACKLIST_FILE="${BLACKLIST_DIR}/blacklist.conf"
+SERVICE_NAME="usb-blacklist-watcher-pve.service"
+OLD_BLACKLIST_DIR="/etc/usb-blacklist-watcher"
+OLD_BLACKLIST_FILE="${OLD_BLACKLIST_DIR}/blacklist.conf"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UTILITY
+# ─────────────────────────────────────────────────────────────────────────────
+
+info() { echo "  [usb-blacklist-watcher-pve] $*"; }
+warn() { echo "  [usb-blacklist-watcher-pve] ATTENZIONE: $*" >&2; }
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CREAZIONE DIRECTORY E FILE DI STATO
+# ─────────────────────────────────────────────────────────────────────────────
+
+setup_config_dir() {
+    if [ ! -d "${BLACKLIST_DIR}" ]; then
+        info "Creazione directory di configurazione: ${BLACKLIST_DIR}"
+        mkdir -p "${BLACKLIST_DIR}"
+    fi
+
+    # Se esiste la vecchia blacklist (/etc/usb-blacklist-watcher/blacklist.conf)
+    # e non è ancora presente la nuova, migriamo la configurazione dell'utente.
+    if [ ! -f "${BLACKLIST_FILE}" ] && [ -f "${OLD_BLACKLIST_FILE}" ]; then
+        info "Migrazione configurazione esistente da ${OLD_BLACKLIST_FILE} a ${BLACKLIST_FILE}..."
+        cp -a "${OLD_BLACKLIST_FILE}" "${BLACKLIST_FILE}"
+    fi
+
+    # Crea il file di blacklist SOLO se non esiste già (preserva la config
+    # dell'utente in caso di upgrade o reinstallazione).
+    if [ ! -f "${BLACKLIST_FILE}" ]; then
+        info "Creazione file di blacklist predefinito: ${BLACKLIST_FILE}"
+        cat > "${BLACKLIST_FILE}" <<'EOF'
+# usb-blacklist-watcher-pve — Blacklist dispositivi USB
+#
+# Questo file definisce i dispositivi USB che NON possono mai essere
+# assegnati in passthrough a una macchina virtuale Proxmox VE.
+#
+# Formato: una entry per riga — VENDOR:PRODUCT  # commento opzionale
+#   Esempio:  2e8a:0005  # MicroPython Board in FS mode
+#   Esempio:  0bda:8156  # Realtek USB 10/100/1G/2.5G LAN
+#
+# - Righe vuote e righe che iniziano con '#' vengono ignorate.
+# - Gli ID sono nel formato hex a 4 cifre, come mostrati da `lsusb`.
+# - Per aggiungere/rimuovere device in modo interattivo, usa:
+#     usb-blacklist-select
+#
+EOF
+    else
+        info "File di blacklist conservato: ${BLACKLIST_FILE}"
+    fi
+
+    # Permessi restrittivi: il file guida un comportamento di sicurezza.
+    chmod 700 "${BLACKLIST_DIR}"
+    chmod 600 "${BLACKLIST_FILE}"
+    chown root:root "${BLACKLIST_DIR}" "${BLACKLIST_FILE}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ABILITAZIONE E AVVIO DEL SERVIZIO SYSTEMD
+# ─────────────────────────────────────────────────────────────────────────────
+
+setup_service() {
+    if ! command -v systemctl &>/dev/null; then
+        warn "systemctl non trovato — salto l'abilitazione del servizio."
+        warn "Abilitare manualmente: systemctl enable --now ${SERVICE_NAME}"
+        return 0
+    fi
+
+    # Se il vecchio servizio usb-blacklist-watcher era attivo, fermalo
+    if systemctl is-active --quiet "usb-blacklist-watcher.service" 2>/dev/null; then
+        info "Arresto precedente servizio usb-blacklist-watcher.service..."
+        systemctl stop "usb-blacklist-watcher.service" || true
+        systemctl disable "usb-blacklist-watcher.service" || true
+    fi
+
+    info "Ricaricamento dei file unit systemd..."
+    systemctl daemon-reload
+
+    info "Abilitazione e avvio del servizio ${SERVICE_NAME}..."
+    systemctl enable --now "${SERVICE_NAME}" || {
+        warn "Impossibile avviare ${SERVICE_NAME} ora."
+        warn "Potrebbe essere necessario che pve-cluster sia montato."
+        warn "Avviare manualmente con: systemctl start ${SERVICE_NAME}"
+    }
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MESSAGGIO FINALE
+# ─────────────────────────────────────────────────────────────────────────────
+
+print_welcome() {
+    echo ""
+    echo "┌─────────────────────────────────────────────────────────────┐"
+    echo "│       usb-blacklist-watcher-pve installato con successo     │"
+    echo "├─────────────────────────────────────────────────────────────┤"
+    echo "│                                                               │"
+    echo "│  Per scegliere quali dispositivi USB proteggere, esegui:     │"
+    echo "│                                                               │"
+    echo "│      usb-blacklist-select                                     │"
+    echo "│                                                               │"
+    echo "│  Per vedere lo stato del watcher:                             │"
+    echo "│      systemctl status usb-blacklist-watcher-pve               │"
+    echo "│                                                               │"
+    echo "│  Blacklist:  /etc/usb-blacklist-watcher-pve/blacklist.conf    │"
+    echo "│  Log:        journalctl -u usb-blacklist-watcher-pve -f       │"
+    echo "│                                                               │"
+    echo "└─────────────────────────────────────────────────────────────┘"
+    echo ""
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN — gestione degli action dpkg standard
+# ─────────────────────────────────────────────────────────────────────────────
+
+case "${1:-}" in
+    configure)
+        setup_config_dir
+        setup_service
+        print_welcome
+        ;;
+    abort-upgrade|abort-remove|abort-deconfigure)
+        # Niente da fare in caso di rollback
+        ;;
+    *)
+        warn "postinst chiamato con action inatteso: '${1:-}'"
+        exit 1
+        ;;
+esac
+
+exit 0

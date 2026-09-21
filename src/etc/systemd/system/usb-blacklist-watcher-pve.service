@@ -1,0 +1,22 @@
+[Unit]
+Description=USB Blacklist Watcher for Proxmox VE (usb-blacklist-watcher-pve)
+Documentation=man:usb-blacklist-watcher-pve(8)
+After=network.target pve-cluster.service
+Wants=pve-cluster.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/usb-blacklist-watcher-pve
+Restart=always
+RestartSec=5
+# Logging via journald (stdout/stderr catturati automaticamente)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=usb-blacklist-watcher-pve
+# Sicurezza minimale: il servizio gira come root (richiesto da qm e per
+# leggere i conf in pmxcfs) ma limitiamo l'accesso al filesystem.
+# ProtectSystem e simili non usati per non bloccare l'accesso a /etc/pve.
+
+[Install]
+WantedBy=multi-user.target
+Alias=usb-blacklist-watcher.service

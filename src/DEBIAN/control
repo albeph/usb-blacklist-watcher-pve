@@ -1,0 +1,28 @@
+Package: usb-blacklist-watcher-pve
+Version: 1.1.0
+Architecture: all
+Maintainer: Proxmox Admin <admin@localhost>
+Depends: bash (>= 4.0), inotify-tools
+Recommends: proxmox-ve
+Provides: usb-blacklist-watcher
+Replaces: usb-blacklist-watcher
+Conflicts: usb-blacklist-watcher
+Section: admin
+Priority: optional
+Description: USB device passthrough blacklist enforcer for Proxmox VE
+ Prevents specific USB devices from being assigned (passed through) to any
+ QEMU/KVM virtual machine on a Proxmox VE host node — whether the VM is
+ running or stopped, and whether the assignment is done via the GUI, the
+ CLI, or any other means.
+ .
+ The package installs two tools:
+  - usb-blacklist-select: an interactive CLI to choose which USB devices to
+    protect, with non-interactive --add/--remove/--list flags for scripting.
+  - usb-blacklist-watcher-pve: a systemd daemon that monitors VM configuration
+    files via inotify and immediately removes any blacklisted USB entries
+    using `qm set <VMID> --delete usbN`, supporting both hot-unplug (running
+    VMs) and static config edits (stopped VMs).
+ .
+ The blacklist is stored in /etc/usb-blacklist-watcher-pve/blacklist.conf and
+ uses vendor:product ID format (e.g. 2e8a:0005) for reliable matching
+ regardless of which USB port a device is plugged into.

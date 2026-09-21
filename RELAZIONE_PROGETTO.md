@@ -198,23 +198,23 @@ Uniformare il nome del progetto a `usb-blacklist-watcher-pve` per chiarire immed
 
 ```
 /home/user/Projects/usb-blacklist-watcher/
-├── build/
-│   └── usb-blacklist-watcher-pve/
-│       ├── DEBIAN/
-│       │   ├── control (Package: usb-blacklist-watcher-pve)
-│       │   ├── postinst (Permessi 600, migrazione config, systemctl enable --now)
-│       │   ├── prerm (Stop & disable servizio)
-│       │   └── postrm (Purge vs Remove)
-│       ├── usr/local/bin/
-│       │   ├── usb-blacklist-select (Tool CLI interattivo)
-│       │   ├── usb-blacklist-watcher-pve (Daemon watcher systemd)
-│       │   ├── usb-blacklist-select-pve (Symlink a select)
-│       │   └── usb-blacklist-watcher (Symlink retrocompatibile)
-│       └── etc/
-│           ├── systemd/system/
-│           │   └── usb-blacklist-watcher-pve.service
-│           └── usb-blacklist-watcher-pve/
-│               └── blacklist.conf (File di stato predefinito)
+├── src/
+│   ├── DEBIAN/
+│   │   ├── control (Package: usb-blacklist-watcher-pve)
+│   │   ├── postinst (Permessi 600, migrazione config, systemctl enable --now)
+│   │   ├── prerm (Stop & disable servizio)
+│   │   └── postrm (Purge vs Remove)
+│   ├── usr/local/bin/
+│   │   ├── usb-blacklist-select (Tool CLI interattivo)
+│   │   ├── usb-blacklist-watcher-pve (Daemon watcher systemd)
+│   │   ├── usb-blacklist-select-pve (Symlink a select)
+│   │   └── usb-blacklist-watcher (Symlink retrocompatibile)
+│   └── etc/
+│       ├── systemd/system/
+│       │   └── usb-blacklist-watcher-pve.service
+│       └── usb-blacklist-watcher-pve/
+│           └── blacklist.conf (File di stato predefinito)
+├── build/ (Staging temporaneo generato da build-deb.sh, ignorato da Git)
 ├── build-deb.sh (Script di build automatizzato)
 ├── README.md (Manuale operativo)
 ├── STRUTTURA.md (Albero del progetto)

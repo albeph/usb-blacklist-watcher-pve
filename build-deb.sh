@@ -18,8 +18,10 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly STAGING_DIR="${SCRIPT_DIR}/build/usb-blacklist-watcher-pve"
-readonly CONTROL_FILE="${STAGING_DIR}/DEBIAN/control"
+readonly SRC_DIR="${SCRIPT_DIR}/src"
+readonly BUILD_DIR="${SCRIPT_DIR}/build"
+readonly STAGING_DIR="${BUILD_DIR}/usb-blacklist-watcher-pve"
+readonly CONTROL_FILE="${SRC_DIR}/DEBIAN/control"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UTILITY
@@ -63,6 +65,21 @@ check_build_deps() {
     if [ "${ok}" -eq 0 ]; then
         exit 1
     fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# PREPARAZIONE STAGING
+# ─────────────────────────────────────────────────────────────────────────────
+
+prepare_staging() {
+    section "Preparazione staging in build/"
+    info "Sorgenti: ${SRC_DIR}"
+    info "Staging:  ${STAGING_DIR}"
+
+    rm -rf "${STAGING_DIR}"
+    mkdir -p "${STAGING_DIR}"
+    cp -a "${SRC_DIR}/." "${STAGING_DIR}/"
+    info "Staging preparato con successo"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,6 +179,7 @@ main() {
     echo "╚════════════════════════════════════════════════════════════╝"
 
     check_build_deps
+    prepare_staging
     set_permissions
     build_deb
     verify_deb
