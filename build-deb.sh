@@ -1,20 +1,20 @@
 #!/bin/bash
-# build-deb.sh — Script di build del pacchetto usb-blacklist-watcher-pve
+# build-deb.sh — Build script for usb-blacklist-watcher-pve Debian package
 #
-# Uso:
+# Usage:
 #   ./build-deb.sh
 #
 # Output:
-#   usb-blacklist-watcher-pve_<VERSION>_all.deb  (nella directory corrente)
+#   usb-blacklist-watcher-pve_<VERSION>_all.deb  (in current directory)
 #
-# Requisiti:
-#   dpkg-deb   (pacchetto dpkg, pre-installato su Debian/Ubuntu/Proxmox)
-#   fakeroot   (opzionale ma raccomandato; fallback su root diretto)
+# Requirements:
+#   dpkg-deb   (dpkg package, pre-installed on Debian/Ubuntu/Proxmox)
+#   fakeroot   (optional but recommended; fallback to direct root)
 
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURAZIONE
+# CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -24,20 +24,20 @@ readonly STAGING_DIR="${BUILD_DIR}/usb-blacklist-watcher-pve"
 readonly CONTROL_FILE="${SRC_DIR}/DEBIAN/control"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UTILITY
+# UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
 info()    { echo "  [build] $*"; }
-error()   { echo "  [build] ERRORE: $*" >&2; }
+error()   { echo "  [build] ERROR: $*" >&2; }
 section() { echo ""; echo "── $* ─────────────────────────────────────────"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LETTURA VERSIONE DAL CONTROL FILE
+# READ VERSION FROM CONTROL FILE
 # ─────────────────────────────────────────────────────────────────────────────
 
 get_version() {
     if [ ! -f "${CONTROL_FILE}" ]; then
-        error "File control non trovato: ${CONTROL_FILE}"
+        error "Control file not found: ${CONTROL_FILE}"
         exit 1
     fi
     grep -E '^Version:' "${CONTROL_FILE}" | awk '{print $2}' | tr -d '[:space:]'
@@ -48,15 +48,15 @@ get_package_name() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VERIFICA DIPENDENZE DI BUILD
+# CHECK BUILD DEPENDENCIES
 # ─────────────────────────────────────────────────────────────────────────────
 
 check_build_deps() {
-    section "Verifica dipendenze di build"
+    section "Check build dependencies"
     local ok=1
 
     if ! command -v dpkg-deb &>/dev/null; then
-        error "dpkg-deb non trovato. Installare con: apt install dpkg"
+        error "dpkg-deb not found. Install with: apt install dpkg"
         ok=0
     else
         info "dpkg-deb: OK ($(dpkg-deb --version | head -1))"
@@ -68,41 +68,41 @@ check_build_deps() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# PREPARAZIONE STAGING
+# STAGING PREPARATION
 # ─────────────────────────────────────────────────────────────────────────────
 
 prepare_staging() {
-    section "Preparazione staging in build/"
-    info "Sorgenti: ${SRC_DIR}"
-    info "Staging:  ${STAGING_DIR}"
+    section "Prepare staging in build/"
+    info "Sources: ${SRC_DIR}"
+    info "Staging: ${STAGING_DIR}"
 
     rm -rf "${STAGING_DIR}"
     mkdir -p "${STAGING_DIR}"
     cp -a "${SRC_DIR}/." "${STAGING_DIR}/"
-    info "Staging preparato con successo"
+    info "Staging prepared successfully"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# IMPOSTAZIONE PERMESSI CORRETTI
+# SET CORRECT PERMISSIONS
 # ─────────────────────────────────────────────────────────────────────────────
 
 set_permissions() {
-    section "Impostazione permessi"
+    section "Set permissions"
 
-    # Script DEBIAN/ devono essere eseguibili
+    # DEBIAN/ scripts must be executable
     chmod 755 "${STAGING_DIR}/DEBIAN/postinst"
     chmod 755 "${STAGING_DIR}/DEBIAN/prerm"
     chmod 755 "${STAGING_DIR}/DEBIAN/postrm"
-    info "Script DEBIAN/: 755"
+    info "DEBIAN/ scripts: 755"
 
-    # Binari installabili
+    # Installable binaries
     chmod 755 "${STAGING_DIR}/usr/local/bin/usb-blacklist-watcher-pve"
     chmod 755 "${STAGING_DIR}/usr/local/bin/usb-blacklist-select"
-    info "Binari usr/local/bin/: 755"
+    info "usr/local/bin/ binaries: 755"
 
-    # Config di default
+    # Default config
     chmod 644 "${STAGING_DIR}/etc/usb-blacklist-watcher-pve/blacklist.conf"
-    info "blacklist.conf default: 644 (postinst la imposta a 600 post-install)"
+    info "default blacklist.conf: 644 (postinst sets 600 post-install)"
 
     # Systemd unit
     chmod 644 "${STAGING_DIR}/etc/systemd/system/usb-blacklist-watcher-pve.service"
@@ -120,23 +120,23 @@ build_deb() {
     package=$(get_package_name)
     output_file="${SCRIPT_DIR}/${package}_${version}_all.deb"
 
-    section "Build pacchetto Debian"
-    info "Pacchetto:  ${package}"
-    info "Versione:   ${version}"
-    info "Output:     ${output_file}"
-    info "Staging:    ${STAGING_DIR}"
+    section "Build Debian package"
+    info "Package:  ${package}"
+    info "Version:  ${version}"
+    info "Output:   ${output_file}"
+    info "Staging:  ${STAGING_DIR}"
 
-    # Rimuovi eventuale .deb precedente con la stessa versione
+    # Remove any previous .deb with the same version
     [ -f "${output_file}" ] && rm -f "${output_file}"
 
-    # dpkg-deb --root-owner-group: imposta uid/gid 0 senza richiedere root
+    # dpkg-deb --root-owner-group: set uid/gid 0 without requiring root
     dpkg-deb --root-owner-group --build "${STAGING_DIR}" "${output_file}"
 
-    info "Build completato: ${output_file}"
+    info "Build completed: ${output_file}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# VERIFICA
+# VERIFICATION
 # ─────────────────────────────────────────────────────────────────────────────
 
 verify_deb() {
@@ -146,21 +146,21 @@ verify_deb() {
     package=$(get_package_name)
     output_file="${SCRIPT_DIR}/${package}_${version}_all.deb"
 
-    section "Verifica pacchetto"
+    section "Verify package"
 
     echo ""
-    echo "  ── Metadati (dpkg --info) ───────────────────────────────"
+    echo "  ── Metadata (dpkg --info) ───────────────────────────────"
     dpkg --info "${output_file}" | sed 's/^/    /'
 
     echo ""
-    echo "  ── Contenuto (dpkg -c) ──────────────────────────────────"
+    echo "  ── Contents (dpkg -c) ───────────────────────────────────"
     dpkg -c "${output_file}" | sed 's/^/    /'
 
     echo ""
-    info "Verifica completata con successo."
+    info "Verification completed successfully."
     echo ""
     echo "┌────────────────────────────────────────────────────────────┐"
-    echo "│  Pacchetto pronto per l'installazione:                      │"
+    echo "│  Package ready for installation:                           │"
     echo "│                                                              │"
     echo "│    dpkg -i ${package}_${version}_all.deb"
     echo "│                                                              │"

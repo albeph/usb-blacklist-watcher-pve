@@ -9,13 +9,13 @@ Type=simple
 ExecStart=/usr/local/bin/usb-blacklist-watcher-pve
 Restart=always
 RestartSec=5
-# Logging via journald (stdout/stderr catturati automaticamente)
+# Logging via journald (stdout/stderr captured automatically)
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=usb-blacklist-watcher-pve
-# Sicurezza minimale: il servizio gira come root (richiesto da qm e per
-# leggere i conf in pmxcfs) ma limitiamo l'accesso al filesystem.
-# ProtectSystem e simili non usati per non bloccare l'accesso a /etc/pve.
+# Minimal security: service runs as root (required by qm and to
+# read VM configs in pmxcfs) but filesystem access is limited.
+# ProtectSystem and similar are omitted to prevent blocking access to /etc/pve.
 
 [Install]
 WantedBy=multi-user.target

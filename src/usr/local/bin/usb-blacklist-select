@@ -1,32 +1,32 @@
 #!/bin/bash
-# usb-blacklist-select — Tool interattivo per gestire la blacklist USB
+# usb-blacklist-select — Interactive tool to manage the USB blacklist
 #
-# Uso interattivo:
+# Interactive usage:
 #   usb-blacklist-select
 #
-# Uso non-interattivo (scripting):
+# Non-interactive usage (scripting):
 #   usb-blacklist-select --list
 #   usb-blacklist-select --add VENDOR:PRODUCT
 #   usb-blacklist-select --remove VENDOR:PRODUCT
 #
-# Il tool salva la blacklist in /etc/usb-blacklist-watcher-pve/blacklist.conf
-# e applica immediatamente l'enforcement su tutte le VM configurate.
+# The tool saves the blacklist to /etc/usb-blacklist-watcher-pve/blacklist.conf
+# and immediately triggers enforcement across all configured VMs.
 
 set -euo pipefail
 
 # ─────────────────────────────────────────────────────────────────────────────
-# CONFIGURAZIONE
+# CONFIGURATION
 # ─────────────────────────────────────────────────────────────────────────────
 
 readonly BLACKLIST_FILE="/etc/usb-blacklist-watcher-pve/blacklist.conf"
 readonly BLACKLIST_DIR="/etc/usb-blacklist-watcher-pve"
 readonly QEMU_DIR="/etc/pve/qemu-server"
 
-# ID dei root hub e hub generici Linux Foundation da filtrare (opzionale)
+# Linux Foundation root hubs and generic hubs to filter out (optional)
 readonly FILTER_IDS=("1d6b:0001" "1d6b:0002" "1d6b:0003")
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UTILITY
+# UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
 info()    { echo "  ✓ $*"; }
@@ -34,7 +34,7 @@ warn()    { echo "  ⚠ $*" >&2; }
 error()   { echo "  ✗ $*" >&2; }
 section() { echo ""; echo "── $* ─────────────────────────────────────────────"; }
 
-# Verifica che l'utente sia root
+# Verify that current user is root
 check_root() {
     if [ "${EUID:-$(id -u)}" -ne 0 ]; then
         error "Questo tool deve essere eseguito come root."
@@ -43,7 +43,7 @@ check_root() {
     fi
 }
 
-# Valida il formato VENDOR:PRODUCT (4 cifre hex : 4 cifre hex)
+# Validate VENDOR:PRODUCT format (4 hex digits : 4 hex digits)
 validate_usb_id() {
     local id="${1}"
     if [[ ! "${id}" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
@@ -51,15 +51,15 @@ validate_usb_id() {
         error "Formato atteso: VENDOR:PRODUCT in esadecimale (es. 2e8a:0005)"
         return 1
     fi
-    # Normalizza in minuscolo
+    # Normalize to lowercase
     echo "${id,,}"
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# GESTIONE FILE DI BLACKLIST
+# BLACKLIST FILE MANAGEMENT
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Assicura che la directory e il file di blacklist esistano.
+# Ensure configuration directory and blacklist file exist
 ensure_blacklist_file() {
     if [ ! -d "${BLACKLIST_DIR}" ]; then
         mkdir -p "${BLACKLIST_DIR}"
@@ -69,10 +69,10 @@ ensure_blacklist_file() {
 
     if [ ! -f "${BLACKLIST_FILE}" ]; then
         cat > "${BLACKLIST_FILE}" <<'EOF'
-# usb-blacklist-watcher-pve — Blacklist dispositivi USB
+# usb-blacklist-watcher-pve — USB Device Blacklist
 #
-# Formato: VENDOR:PRODUCT  # commento opzionale
-# Righe vuote e righe che iniziano con '#' vengono ignorate.
+# Format: VENDOR:PRODUCT  # optional comment
+# Blank lines and lines starting with '#' are ignored.
 #
 EOF
         chmod 600 "${BLACKLIST_FILE}"
@@ -80,8 +80,8 @@ EOF
     fi
 }
 
-# Legge la blacklist e restituisce gli ID (VENDOR:PRODUCT) uno per riga,
-# normalizzati in minuscolo.
+# Reads the blacklist and returns IDs (VENDOR:PRODUCT) one per line,
+# normalized to lowercase.
 read_blacklist() {
     if [ ! -f "${BLACKLIST_FILE}" ]; then
         return 0
@@ -93,17 +93,17 @@ read_blacklist() {
         || true
 }
 
-# Controlla se un ID è già in blacklist. Ritorna 0 se sì, 1 se no.
-# FIX 4: accetta la blacklist pre-letta come secondo argomento opzionale,
-# evitando una lettura del file per ogni device mostrato nella UI.
+# Checks if an ID is in the blacklist. Returns 0 if found, 1 otherwise.
+# FIX 4: accepts pre-read blacklist as optional second argument,
+# avoiding file reads for every device displayed in the UI.
 is_in_blacklist() {
     local id="${1,,}"
     local cached_blacklist="${2:-$(read_blacklist)}"
     echo "${cached_blacklist}" | grep -qi "^${id}$"
 }
 
-# Aggiunge un ID alla blacklist (se non già presente).
-# Argomenti: id [descrizione opzionale]
+# Adds an ID to the blacklist (if not already present).
+# Arguments: id [optional description]
 blacklist_add() {
     local id="${1,,}"
     local desc="${2:-}"
@@ -123,7 +123,7 @@ blacklist_add() {
     info "Aggiunto alla blacklist: ${id}${comment}"
 }
 
-# Rimuove un ID dalla blacklist.
+# Removes an ID from the blacklist.
 blacklist_remove() {
     local id="${1,,}"
 
@@ -134,8 +134,8 @@ blacklist_remove() {
         return 0
     fi
 
-    # Rimuove la riga che inizia con l'ID (case-insensitive), preservando commenti
-    # globali e altre entry.
+    # Removes line starting with the ID (case-insensitive), preserving global
+    # comments and other entries.
     local tmp_file
     tmp_file=$(mktemp)
     grep -iv "^${id}\b" "${BLACKLIST_FILE}" > "${tmp_file}" || true
@@ -146,14 +146,14 @@ blacklist_remove() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SCOPERTA DEVICE USB
+# USB DEVICE DISCOVERY
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Esegue lsusb e raccoglie i device in un array associativo.
-# Popola le variabili globali:
-#   USB_IDS[]        — array di VENDOR:PRODUCT
-#   USB_DESCS[]      — array di descrizioni
-#   USB_COUNT        — numero totale di device
+# Executes lsusb and collects devices into arrays.
+# Populates global variables:
+#   USB_IDS[]        — array of VENDOR:PRODUCT
+#   USB_DESCS[]      — array of descriptions
+#   USB_COUNT        — total device count
 discover_usb_devices() {
     if ! command -v lsusb &>/dev/null; then
         error "Comando 'lsusb' non trovato. Installare usbutils."
@@ -164,16 +164,16 @@ discover_usb_devices() {
     USB_DESCS=()
     USB_COUNT=0
 
-    # Formato lsusb: "Bus 001 Device 002: ID 2e8a:0005 MicroPython Board in FS mode"
+    # lsusb format: "Bus 001 Device 002: ID 2e8a:0005 MicroPython Board in FS mode"
     while IFS= read -r line; do
-        # Estrae vendor:product e descrizione
+        # Extract vendor:product and description
         local id desc
         id=$(echo "${line}" | grep -oP 'ID \K[0-9a-fA-F]{4}:[0-9a-fA-F]{4}' | tr '[:upper:]' '[:lower:]' || true)
         desc=$(echo "${line}" | sed -E 's/.*ID [0-9a-fA-F]{4}:[0-9a-fA-F]{4}\s*//' | xargs || true)
 
         [ -z "${id}" ] && continue
 
-        # Filtra hub Linux Foundation
+        # Filter Linux Foundation hubs
         local skip=0
         local filter_id
         for filter_id in "${FILTER_IDS[@]}"; do
@@ -195,9 +195,9 @@ discover_usb_devices() {
 # DISPLAY
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Mostra l'elenco dei device USB con stato blacklist.
-# FIX 4: accetta la blacklist pre-letta come argomento per evitare
-# N letture del file (una per device) durante la visualizzazione.
+# Displays list of USB devices with blacklist status.
+# FIX 4: accepts pre-read blacklist as argument to avoid
+# N file reads (one per device) during rendering.
 show_usb_list() {
     local cached_blacklist="${1:-$(read_blacklist)}"
     section "Dispositivi USB collegati"
@@ -223,7 +223,7 @@ show_usb_list() {
     done
 }
 
-# Mostra la blacklist corrente.
+# Displays current blacklist.
 show_blacklist() {
     section "Blacklist corrente"
     local entries
@@ -236,7 +236,7 @@ show_blacklist() {
 
     local id
     while IFS= read -r id; do
-        # Cerca la descrizione tra i device USB rilevati
+        # Search description among detected USB devices
         local desc=""
         local j
         for (( j=0; j<USB_COUNT; j++ )); do
@@ -250,12 +250,12 @@ show_blacklist() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# ENFORCEMENT IMMEDIATO
+# IMMEDIATE ENFORCEMENT
 # ─────────────────────────────────────────────────────────────────────────────
 
-# Applica l'enforcement su tutte le VM dopo una modifica alla blacklist.
-# Questa funzione replica la logica del watcher per funzionare anche quando
-# il servizio non è attivo (es. durante il setup iniziale).
+# Applies enforcement on all VMs after a blacklist change.
+# Replicates watcher logic to function even when the daemon
+# service is inactive (e.g. during initial setup).
 trigger_enforcement() {
     section "Enforcement immediato"
 
@@ -285,7 +285,7 @@ trigger_enforcement() {
         vmid=$(basename "${conf_file}" .conf)
         [[ "${vmid}" =~ ^[0-9]+$ ]] || continue
 
-        # Per ogni device assegnato, verifica se è in blacklist
+        # For each assigned device, check if blacklisted
         local line
         while IFS= read -r line; do
             local key
@@ -300,7 +300,7 @@ trigger_enforcement() {
             if [[ "${host_val}" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
                 actual_id="${host_val,,}"
             elif [[ "${host_val}" =~ ^[0-9]+-[0-9]+(\.[0-9]+)*$ ]]; then
-                # Risoluzione bus-port tramite sysfs
+                # Bus-port resolution via sysfs
                 local sysfs_dir="/sys/bus/usb/devices/${host_val}"
                 if [ -f "${sysfs_dir}/idVendor" ] && [ -f "${sysfs_dir}/idProduct" ]; then
                     local vendor product
@@ -312,7 +312,7 @@ trigger_enforcement() {
 
             [ -z "${actual_id}" ] && continue
 
-            # Se l'ID effettivo (vendor:product) è in blacklist, rimuoviamo
+            # If effective ID (vendor:product) is blacklisted, remove it
             if echo "${current_blacklist}" | grep -qi "^${actual_id}$"; then
                 echo "  → VM ${vmid}: rimozione '${key}' (host=${host_val})..."
                 qm set "${vmid}" --delete "${key}" 2>&1 | sed 's/^/    /' || \
@@ -330,7 +330,7 @@ trigger_enforcement() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODALITÀ INTERATTIVA
+# INTERACTIVE MODE
 # ─────────────────────────────────────────────────────────────────────────────
 
 interactive_mode() {
@@ -341,8 +341,8 @@ interactive_mode() {
 
     discover_usb_devices
 
-    # FIX 4: lettura unica della blacklist — passata a show_usb_list e show_blacklist
-    # evita N+1 letture del file durante la visualizzazione iniziale
+    # FIX 4: single blacklist read passed to show_usb_list and show_blacklist
+    # avoids N+1 file reads during initial display
     local current_blacklist
     current_blacklist=$(read_blacklist)
 
@@ -368,11 +368,11 @@ interactive_mode() {
         exit 0
     fi
 
-    # Normalizza l'input: sostituisce virgole con spazi, rimuove duplicati
+    # Normalize input: replace commas with spaces, squeeze duplicate spaces
     local normalized_input
     normalized_input=$(echo "${user_input}" | tr ',' ' ' | tr -s ' ')
 
-    # Raccoglie le selezioni valide
+    # Collect valid selections
     local to_add=()
     local to_add_descs=()
     local to_remove=()
@@ -380,7 +380,7 @@ interactive_mode() {
 
     local num
     for num in ${normalized_input}; do
-        # Verifica che sia un numero
+        # Verify it is a number
         if [[ ! "${num}" =~ ^[0-9]+$ ]]; then
             warn "Valore non valido ignorato: '${num}'"
             continue
@@ -388,7 +388,7 @@ interactive_mode() {
 
         local idx=$(( num - 1 ))
 
-        # Verifica che l'indice sia nel range
+        # Verify index is within range
         if [ "${idx}" -lt 0 ] || [ "${idx}" -ge "${USB_COUNT}" ]; then
             warn "Numero fuori range ignorato: ${num} (range: 1-${USB_COUNT})"
             invalid=1
@@ -398,7 +398,7 @@ interactive_mode() {
         local id="${USB_IDS[$idx]}"
         local desc="${USB_DESCS[$idx]}"
 
-        # FIX 4: usa la blacklist già letta in memoria
+        # FIX 4: use pre-read in-memory blacklist
         if is_in_blacklist "${id}" "${current_blacklist}"; then
             to_remove+=("${id}")
         else
@@ -407,7 +407,7 @@ interactive_mode() {
         fi
     done
 
-    # Mostra il riepilogo delle modifiche e chiede conferma
+    # Display summary of changes and prompt for confirmation
     if [ "${#to_add[@]}" -eq 0 ] && [ "${#to_remove[@]}" -eq 0 ]; then
         echo ""
         warn "Nessuna modifica da applicare."
@@ -441,7 +441,7 @@ interactive_mode() {
         exit 0
     fi
 
-    # Applica le modifiche
+    # Apply changes
     section "Applicazione modifiche"
 
     local i
@@ -454,7 +454,7 @@ interactive_mode() {
         blacklist_remove "${id}"
     done
 
-    # Mostra la blacklist aggiornata
+    # Display updated blacklist
     section "Blacklist aggiornata"
     local final_blacklist
     final_blacklist=$(read_blacklist)
@@ -467,7 +467,7 @@ interactive_mode() {
         done <<< "${final_blacklist}"
     fi
 
-    # Enforcement immediato
+    # Immediate enforcement
     trigger_enforcement
 
     echo ""
@@ -475,7 +475,7 @@ interactive_mode() {
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# MODALITÀ NON INTERATTIVA
+# NON-INTERACTIVE MODE
 # ─────────────────────────────────────────────────────────────────────────────
 
 cmd_list() {
@@ -496,7 +496,7 @@ cmd_add() {
 
     ensure_blacklist_file
 
-    # Cerca una descrizione dal lsusb se disponibile
+    # Search description from lsusb if available
     local desc=""
     if command -v lsusb &>/dev/null; then
         desc=$(lsusb 2>/dev/null \

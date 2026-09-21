@@ -1,16 +1,16 @@
 #!/bin/bash
-# postrm — eseguito da dpkg DOPO la rimozione del pacchetto
+# postrm — executed by dpkg AFTER package removal
 set -euo pipefail
 
 BLACKLIST_DIR="/etc/usb-blacklist-watcher-pve"
 OLD_BLACKLIST_DIR="/etc/usb-blacklist-watcher"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UTILITY
+# UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
 info() { echo "  [usb-blacklist-watcher-pve] $*"; }
-warn() { echo "  [usb-blacklist-watcher-pve] ATTENZIONE: $*" >&2; }
+warn() { echo "  [usb-blacklist-watcher-pve] WARNING: $*" >&2; }
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
@@ -18,36 +18,35 @@ warn() { echo "  [usb-blacklist-watcher-pve] ATTENZIONE: $*" >&2; }
 
 case "${1:-}" in
     purge)
-        # Solo in caso di purge completa: rimuovi la directory di configurazione
-        # con la blacklist. In caso di semplice "remove" la blacklist viene
-        # conservata per un eventuale reinstall successivo.
+        # Only on complete purge: remove configuration directory and blacklist.
+        # On simple "remove", the blacklist is preserved for future reinstallation.
         if [ -d "${BLACKLIST_DIR}" ]; then
-            info "Purge: rimozione della directory di configurazione ${BLACKLIST_DIR}..."
+            info "Purge: removing configuration directory ${BLACKLIST_DIR}..."
             rm -rf "${BLACKLIST_DIR}"
-            info "Configurazione rimossa."
+            info "Configuration removed."
         fi
         if [ -d "${OLD_BLACKLIST_DIR}" ]; then
-            info "Purge: rimozione della precedente directory di configurazione ${OLD_BLACKLIST_DIR}..."
+            info "Purge: removing previous configuration directory ${OLD_BLACKLIST_DIR}..."
             rm -rf "${OLD_BLACKLIST_DIR}"
         fi
-        # Ricarica i daemon unit dopo la rimozione del file .service
+        # Reload daemon units after removing .service file
         if command -v systemctl &>/dev/null; then
             systemctl daemon-reload || true
         fi
         ;;
     remove)
-        # Rimozione semplice: la blacklist viene preservata in ${BLACKLIST_DIR}.
-        # Ricarica i daemon unit dopo la rimozione del file .service.
+        # Simple remove: blacklist is preserved in ${BLACKLIST_DIR}.
+        # Reload daemon units after removing .service file.
         if command -v systemctl &>/dev/null; then
             systemctl daemon-reload || true
         fi
-        info "Configurazione conservata in ${BLACKLIST_DIR} (usa 'apt purge' per rimuoverla)."
+        info "Configuration preserved in ${BLACKLIST_DIR} (use 'apt purge' to remove it)."
         ;;
     upgrade|failed-upgrade|abort-install|abort-upgrade|disappear)
-        # Niente da fare
+        # Nothing to do
         ;;
     *)
-        warn "postrm chiamato con action inatteso: '${1:-}'"
+        warn "postrm called with unexpected action: '${1:-}'"
         exit 1
         ;;
 esac

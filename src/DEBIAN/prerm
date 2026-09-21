@@ -1,39 +1,39 @@
 #!/bin/bash
-# prerm — eseguito da dpkg PRIMA della rimozione del pacchetto
+# prerm — executed by dpkg BEFORE package removal
 set -euo pipefail
 
 SERVICE_NAME="usb-blacklist-watcher-pve.service"
 OLD_SERVICE_NAME="usb-blacklist-watcher.service"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# UTILITY
+# UTILITIES
 # ─────────────────────────────────────────────────────────────────────────────
 
 info() { echo "  [usb-blacklist-watcher-pve] $*"; }
-warn() { echo "  [usb-blacklist-watcher-pve] ATTENZIONE: $*" >&2; }
+warn() { echo "  [usb-blacklist-watcher-pve] WARNING: $*" >&2; }
 
 # ─────────────────────────────────────────────────────────────────────────────
-# STOP E DISABILITAZIONE DEL SERVIZIO
+# STOP AND DISABLE SERVICE
 # ─────────────────────────────────────────────────────────────────────────────
 
 stop_service() {
     if ! command -v systemctl &>/dev/null; then
-        warn "systemctl non trovato — salto lo stop del servizio."
+        warn "systemctl not found — skipping service stop."
         return 0
     fi
 
     if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
-        info "Arresto del servizio ${SERVICE_NAME}..."
-        systemctl stop "${SERVICE_NAME}" || warn "Impossibile fermare il servizio."
+        info "Stopping service ${SERVICE_NAME}..."
+        systemctl stop "${SERVICE_NAME}" || warn "Unable to stop service."
     fi
 
     if systemctl is-enabled --quiet "${SERVICE_NAME}" 2>/dev/null; then
-        info "Disabilitazione del servizio ${SERVICE_NAME}..."
-        systemctl disable "${SERVICE_NAME}" || warn "Impossibile disabilitare il servizio."
+        info "Disabling service ${SERVICE_NAME}..."
+        systemctl disable "${SERVICE_NAME}" || warn "Unable to disable service."
     fi
 
     if systemctl is-active --quiet "${OLD_SERVICE_NAME}" 2>/dev/null; then
-        info "Arresto del vecchio servizio ${OLD_SERVICE_NAME}..."
+        info "Stopping legacy service ${OLD_SERVICE_NAME}..."
         systemctl stop "${OLD_SERVICE_NAME}" || true
         systemctl disable "${OLD_SERVICE_NAME}" || true
     fi
@@ -48,7 +48,7 @@ case "${1:-}" in
         stop_service
         ;;
     *)
-        warn "prerm chiamato con action inatteso: '${1:-}'"
+        warn "prerm called with unexpected action: '${1:-}'"
         exit 1
         ;;
 esac
