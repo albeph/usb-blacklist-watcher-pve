@@ -18,8 +18,8 @@ set -euo pipefail
 # ─────────────────────────────────────────────────────────────────────────────
 
 readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly VERSION_FILE="${SCRIPT_DIR}/VERSION"
 readonly SRC_DIR="${SCRIPT_DIR}/src"
+readonly VERSION_FILE="${SRC_DIR}/VERSION"
 readonly BUILD_DIR="${SCRIPT_DIR}/build"
 readonly STAGING_DIR="${BUILD_DIR}/usb-blacklist-watcher-pve"
 readonly CONTROL_FILE="${SRC_DIR}/DEBIAN/control"
@@ -107,6 +107,8 @@ sync_version() {
     if [ -f "${STAGING_DIR}/DEBIAN/control" ]; then
         sed -i -E "s/^Version:.*/Version: ${version}/" "${STAGING_DIR}/DEBIAN/control"
     fi
+    # Exclude VERSION from staging so it is not packaged into / of target system
+    rm -f "${STAGING_DIR}/VERSION"
     info "Version synchronized: ${version}"
 }
 

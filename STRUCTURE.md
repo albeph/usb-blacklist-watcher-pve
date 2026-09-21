@@ -16,19 +16,20 @@ usb-blacklist-watcher-pve/
 │   │   ├── usb-blacklist-select-pve -> ...     # Convenience symlink to usb-blacklist-select
 │   │   └── usb-blacklist-watcher -> ...        # Backward-compatibility symlink to usb-blacklist-watcher-pve
 │   │
-│   └── etc/
-│       ├── systemd/system/
-│       │   └── usb-blacklist-watcher-pve.service # Systemd unit (Restart=always, After=pve-cluster)
-│       └── usb-blacklist-watcher-pve/
-│           └── blacklist.conf                  # State file with commented header (empty by default)
+│   ├── etc/
+│   │   ├── systemd/system/
+│   │   │   └── usb-blacklist-watcher-pve.service # Systemd unit (Restart=always, After=pve-cluster)
+│   │   └── usb-blacklist-watcher-pve/
+│   │       └── blacklist.conf                  # State file with commented header (empty by default)
+│   │
+│   └── VERSION                                 # Package version definition file (e.g. 1.1.0)
 │
 ├── build/                                      # Temporary staging directory for dpkg-deb (ignored by Git)
 ├── .git/                                       # Git repository for version tracking
 ├── .gitignore                                  # Build exclusion rules (build/, *.deb, temp files)
-├── build-deb.sh                                # Build script with auto-versioning from VERSION
+├── build-deb.sh                                # Build script with auto-versioning from src/VERSION
 ├── README.md                                   # Operational documentation (build, install, usage, purge)
-├── STRUCTURE.md                                # This file: detailed project tree
-└── VERSION                                     # Package version definition file (e.g. 1.1.0)
+└── STRUCTURE.md                                # This file: detailed project tree
 ```
 
 ---
@@ -36,7 +37,7 @@ usb-blacklist-watcher-pve/
 ## Main Files — Summary Description
 
 ### `src/DEBIAN/control`
-Debian package metadata. Contains package name (`usb-blacklist-watcher-pve`), version, architecture (`all`), and declared dependencies: `bash (>= 4.0)` and `inotify-tools`. Also includes `Provides`, `Replaces`, and `Conflicts` targeting `usb-blacklist-watcher` to ensure clean and seamless upgrades. The `Version:` field is automatically synchronized from `VERSION` by `build-deb.sh`.
+Debian package metadata. Contains package name (`usb-blacklist-watcher-pve`), version, architecture (`all`), and declared dependencies: `bash (>= 4.0)` and `inotify-tools`. Also includes `Provides`, `Replaces`, and `Conflicts` targeting `usb-blacklist-watcher` to ensure clean and seamless upgrades. The `Version:` field is automatically synchronized from `src/VERSION` by `build-deb.sh`.
 
 ### `src/DEBIAN/postinst`
 Executed by `dpkg` after package installation. Handles automatic migration of any existing blacklist from `/etc/usb-blacklist-watcher/blacklist.conf` to `/etc/usb-blacklist-watcher-pve/blacklist.conf`, creates the default file if absent, sets `600 root:root` permissions, stops any previous instances of the old service, and executes `systemctl daemon-reload` and `systemctl enable --now usb-blacklist-watcher-pve.service`.
@@ -79,7 +80,7 @@ Empty lines and lines starting with `#` are ignored. Permissions `600 root:root`
 ---
 
 ### `build-deb.sh`
-Build automation script. Reads the version from `VERSION` and package name from `src/DEBIAN/control`, synchronizes the version into control files, stages sources into `build/`, sets correct permissions on all files, invokes `dpkg-deb --root-owner-group --build`, and verifies results with `dpkg --info` and `dpkg -c`.
+Build automation script. Reads the version from `src/VERSION` and package name from `src/DEBIAN/control`, synchronizes the version into control files, stages sources into `build/`, sets correct permissions on all files, invokes `dpkg-deb --root-owner-group --build`, and verifies results with `dpkg --info` and `dpkg -c`.
 
-### `VERSION`
-Defines the package version string (e.g. `1.1.0`). Read by `build-deb.sh` as the single source of truth for package versioning, which synchronizes it into `src/DEBIAN/control` and the output `.deb` package filename.
+### `src/VERSION`
+Defines the package version string (e.g. `1.1.0`). Read by `build-deb.sh` as the single source of truth for package versioning, which synchronizes it into `src/DEBIAN/control` and the output `.deb` package filename (excluded from final package staging to avoid packaging into the target system root).
