@@ -124,16 +124,6 @@ grep usb0 /etc/pve/qemu-server/100.conf  # should return empty
 journalctl -u usb-blacklist-watcher-pve --no-pager | tail -5
 ```
 
----
-
-## Installed File Structure
-
-```
-/usr/local/bin/usb-blacklist-select        # interactive CLI tool
-/usr/local/bin/usb-blacklist-watcher-pve    # watcher daemon (symlink: usb-blacklist-watcher)
-/etc/systemd/system/usb-blacklist-watcher-pve.service (alias: usb-blacklist-watcher.service)
-/etc/usb-blacklist-watcher-pve/blacklist.conf  # persistent blacklist
-```
 
 ---
 
