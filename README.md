@@ -173,10 +173,6 @@ This removes `/etc/usb-blacklist-watcher-pve/` and all its contents.
 
 ## Versioning
 
-The package version is defined in the `src/VERSION` file:
-
-```
-1.1.0
-```
+The package version is defined in the `src/VERSION` file
 
 Update this file before running `./build-deb.sh`. The build script will automatically synchronize the version into `src/DEBIAN/control` and produce a package with the new version in the filename.
