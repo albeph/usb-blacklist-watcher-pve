@@ -1,7 +1,7 @@
 Package: usb-blacklist-watcher-pve
 Version: 1.1.0
 Architecture: all
-Maintainer: Proxmox Admin <admin@localhost>
+Maintainer: albeph
 Depends: bash (>= 4.0), inotify-tools
 Recommends: proxmox-ve
 Provides: usb-blacklist-watcher
