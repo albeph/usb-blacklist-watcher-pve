@@ -1,5 +1,5 @@
 Package: usb-blacklist-watcher-pve
-Version: 1.2.3
+Version: 1.3.0
 Architecture: all
 Maintainer: albeph
 Depends: bash (>= 4.0), inotify-tools

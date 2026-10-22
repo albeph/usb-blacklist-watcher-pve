@@ -2,7 +2,7 @@
 # postinst — executed by dpkg after package installation/upgrade
 set -euo pipefail
 
-PACKAGE_VERSION="1.2.3"
+PACKAGE_VERSION="1.3.0"
 BLACKLIST_DIR="/etc/usb-blacklist-watcher-pve"
 BLACKLIST_FILE="${BLACKLIST_DIR}/blacklist.conf"
 ADVANCED_FILE="${BLACKLIST_DIR}/advanced.conf"

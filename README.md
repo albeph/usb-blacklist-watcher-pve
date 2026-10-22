@@ -33,7 +33,7 @@ chmod +x build-deb.sh
 ./build-deb.sh
 ```
 
-This generates `usb-blacklist-watcher-pve_1.2.3_all.deb` in the current directory.
+This generates `usb-blacklist-watcher-pve_1.3.0_all.deb` in the current directory.
 
 To update the version before building, modify the `src/VERSION` file — `build-deb.sh` will synchronize `src/DEBIAN/control`, `src/DEBIAN/postinst`, and name the resulting `.deb` package automatically.
 
@@ -44,9 +44,9 @@ To update the version before building, modify the `src/VERSION` file — `build-
 On a Proxmox VE host node:
 
 ```bash
-dpkg -i usb-blacklist-watcher-pve_1.2.3_all.deb
+dpkg -i usb-blacklist-watcher-pve_1.3.0_all.deb
 # or, with automatic dependency resolution:
-apt install ./usb-blacklist-watcher-pve_1.2.3_all.deb
+apt install ./usb-blacklist-watcher-pve_1.3.0_all.deb
 ```
 
 The `preinst` and `postinst` scripts automatically handle:

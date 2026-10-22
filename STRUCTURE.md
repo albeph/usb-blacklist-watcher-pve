@@ -22,7 +22,7 @@ usb-blacklist-watcher-pve/
 │   │       ├── blacklist.conf                  # Standard blacklist state file (empty by default)
 │   │       └── advanced.conf                   # Advanced Protection (Udev raw node block) state file
 │   │
-│   └── VERSION                                 # Package version definition file (e.g. 1.2.3)
+│   └── VERSION                                 # Package version definition file (e.g. 1.3.0)
 │
 ├── build/                                      # Temporary staging directory for dpkg-deb (ignored by Git)
 ├── .git/                                       # Git repository for version tracking
