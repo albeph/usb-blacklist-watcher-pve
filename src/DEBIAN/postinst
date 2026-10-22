@@ -2,11 +2,19 @@
 # postinst — executed by dpkg after package installation/upgrade
 set -euo pipefail
 
+PACKAGE_VERSION="1.2.3"
 BLACKLIST_DIR="/etc/usb-blacklist-watcher-pve"
 BLACKLIST_FILE="${BLACKLIST_DIR}/blacklist.conf"
+ADVANCED_FILE="${BLACKLIST_DIR}/advanced.conf"
+VERSION_STATE_FILE="${BLACKLIST_DIR}/.version"
+OLD_VERSION_FILE="${BLACKLIST_DIR}/.old_version"
+UDEV_RULES_FILE="/etc/udev/rules.d/99-usb-blacklist-watcher-pve.rules"
 SERVICE_NAME="usb-blacklist-watcher-pve.service"
 OLD_BLACKLIST_DIR="/etc/usb-blacklist-watcher"
 OLD_BLACKLIST_FILE="${OLD_BLACKLIST_DIR}/blacklist.conf"
+
+RECONFIG_REQUIRED=0
+UPGRADE_SUMMARY=""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UTILITIES
@@ -15,28 +23,14 @@ OLD_BLACKLIST_FILE="${OLD_BLACKLIST_DIR}/blacklist.conf"
 info() { echo "  [usb-blacklist-watcher-pve] $*"; }
 warn() { echo "  [usb-blacklist-watcher-pve] WARNING: $*" >&2; }
 
-# ─────────────────────────────────────────────────────────────────────────────
-# DIRECTORY AND STATE FILE CREATION
-# ─────────────────────────────────────────────────────────────────────────────
+# Extracts MAJOR.MINOR from a semantic version string (e.g. "1.2.3" -> "1.2")
+get_major_minor() {
+    local ver="${1:-}"
+    echo "${ver}" | grep -oE '^[0-9]+\.[0-9]+' || true
+}
 
-setup_config_dir() {
-    if [ ! -d "${BLACKLIST_DIR}" ]; then
-        info "Creating configuration directory: ${BLACKLIST_DIR}"
-        mkdir -p "${BLACKLIST_DIR}"
-    fi
-
-    # If the old blacklist exists (/etc/usb-blacklist-watcher/blacklist.conf)
-    # and the new one is not yet present, migrate user configuration.
-    if [ ! -f "${BLACKLIST_FILE}" ] && [ -f "${OLD_BLACKLIST_FILE}" ]; then
-        info "Migrating existing configuration from ${OLD_BLACKLIST_FILE} to ${BLACKLIST_FILE}..."
-        cp -a "${OLD_BLACKLIST_FILE}" "${BLACKLIST_FILE}"
-    fi
-
-    # Create blacklist file ONLY if it does not already exist (preserve user
-    # configuration across upgrades or reinstallations).
-    if [ ! -f "${BLACKLIST_FILE}" ]; then
-        info "Creating default blacklist file: ${BLACKLIST_FILE}"
-        cat > "${BLACKLIST_FILE}" <<'EOF'
+write_default_blacklist() {
+    cat > "${BLACKLIST_FILE}" <<'EOF'
 # usb-blacklist-watcher-pve — USB Device Blacklist
 #
 # This file defines USB devices that must NEVER be passed through
@@ -49,17 +43,162 @@ setup_config_dir() {
 # - Blank lines and lines starting with '#' are ignored.
 # - IDs are 4-digit hexadecimal format, as shown by `lsusb`.
 # - To add/remove devices interactively, use:
-#     usb-blacklist-select
+#     usb-blacklist-select-pve
 #
 EOF
-    else
-        info "Blacklist file preserved: ${BLACKLIST_FILE}"
+}
+
+write_default_advanced() {
+    cat > "${ADVANCED_FILE}" <<'EOF'
+# usb-blacklist-watcher-pve — USB Advanced Protection (Udev Raw Node Block)
+#
+# This file defines blacklisted USB devices for which Advanced Protection
+# is enabled (removes /dev/bus/usb/XXX/YYY raw node via Udev while keeping
+# kernel devices like /dev/sdX and /dev/ttyACM0 intact).
+#
+# Format: one entry per line — VENDOR:PRODUCT  # optional comment
+# - Blank lines and lines starting with '#' are ignored.
+# - To manage interactively or via CLI, use:
+#     usb-blacklist-select-pve
+#     usb-blacklist-select-pve --advanced-add VENDOR:PRODUCT
+#
+EOF
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DIRECTORY AND STATE FILE MANAGEMENT (VERSION-AWARE)
+# ─────────────────────────────────────────────────────────────────────────────
+
+setup_config_dir() {
+    local dpkg_old_ver="${1:-}"
+
+    if [ ! -d "${BLACKLIST_DIR}" ]; then
+        info "Creating configuration directory: ${BLACKLIST_DIR}"
+        mkdir -p "${BLACKLIST_DIR}"
     fi
 
-    # Restrictive permissions: this file guides a security mechanism.
+    # Determine previous version from dpkg argument, preinst state, or .version file
+    local old_version="${dpkg_old_ver}"
+    if [ -z "${old_version}" ] && [ -f "${OLD_VERSION_FILE}" ]; then
+        old_version=$(tr -d '[:space:]' < "${OLD_VERSION_FILE}" || true)
+    fi
+    if [ -z "${old_version}" ] && [ -f "${VERSION_STATE_FILE}" ]; then
+        old_version=$(tr -d '[:space:]' < "${VERSION_STATE_FILE}" || true)
+    fi
+    rm -f "${OLD_VERSION_FILE}"
+
+    local old_mm new_mm
+    old_mm=$(get_major_minor "${old_version}")
+    new_mm=$(get_major_minor "${PACKAGE_VERSION}")
+
+    if [ -n "${old_mm}" ] && [ -n "${new_mm}" ]; then
+        if [ "${old_mm}" = "${new_mm}" ]; then
+            # ── PATCH UPDATE (e.g. 1.2.1 -> 1.2.2): PRESERVE CONFIGURATION ──
+            info "Patch update (${old_version} -> ${PACKAGE_VERSION}): preserving existing configuration."
+            if [ -f "${BLACKLIST_DIR}/.blacklist.conf.preinst_bak" ]; then
+                mv -f "${BLACKLIST_DIR}/.blacklist.conf.preinst_bak" "${BLACKLIST_FILE}"
+            fi
+            if [ -f "${BLACKLIST_DIR}/.advanced.conf.preinst_bak" ]; then
+                mv -f "${BLACKLIST_DIR}/.advanced.conf.preinst_bak" "${ADVANCED_FILE}"
+            fi
+            UPGRADE_SUMMARY="Configuration preserved (patch update ${old_version} -> ${PACKAGE_VERSION})"
+        else
+            # ── MAJOR / MINOR UPDATE (e.g. 1.2.x -> 1.3.x or 1.x.x -> 2.x.x): RESET ──
+            warn "Major/Minor version change (${old_version} -> ${PACKAGE_VERSION}): resetting configuration."
+            if [ -f "${BLACKLIST_DIR}/.blacklist.conf.preinst_bak" ]; then
+                mv -f "${BLACKLIST_DIR}/.blacklist.conf.preinst_bak" "${BLACKLIST_FILE}.bak"
+                chmod 600 "${BLACKLIST_FILE}.bak"
+            fi
+            if [ -f "${BLACKLIST_DIR}/.advanced.conf.preinst_bak" ]; then
+                mv -f "${BLACKLIST_DIR}/.advanced.conf.preinst_bak" "${ADVANCED_FILE}.bak"
+                chmod 600 "${ADVANCED_FILE}.bak"
+            fi
+            write_default_blacklist
+            write_default_advanced
+            if [ -f "${UDEV_RULES_FILE}" ]; then
+                rm -f "${UDEV_RULES_FILE}"
+                if command -v udevadm &>/dev/null; then
+                    udevadm control --reload-rules && udevadm trigger --subsystem-match=usb || true
+                fi
+            fi
+            RECONFIG_REQUIRED=1
+            UPGRADE_SUMMARY="Major/Minor upgrade (${old_version} -> ${PACKAGE_VERSION}) — reconfiguration required"
+        fi
+    else
+        # ── FRESH INSTALL OR LEGACY MIGRATION ──
+        rm -f "${BLACKLIST_DIR}/.blacklist.conf.preinst_bak" "${BLACKLIST_DIR}/.advanced.conf.preinst_bak"
+
+        if [ ! -f "${BLACKLIST_FILE}" ] && [ -f "${OLD_BLACKLIST_FILE}" ]; then
+            info "Migrating existing configuration from ${OLD_BLACKLIST_FILE} to ${BLACKLIST_FILE}..."
+            cp -a "${OLD_BLACKLIST_FILE}" "${BLACKLIST_FILE}"
+        fi
+
+        if [ ! -f "${BLACKLIST_FILE}" ]; then
+            info "Creating default blacklist file: ${BLACKLIST_FILE}"
+            write_default_blacklist
+        fi
+
+        if [ ! -f "${ADVANCED_FILE}" ]; then
+            info "Creating default advanced protection file: ${ADVANCED_FILE}"
+            write_default_advanced
+        fi
+        RECONFIG_REQUIRED=1
+    fi
+
+    # Ensure files exist in all cases
+    [ -f "${BLACKLIST_FILE}" ] || write_default_blacklist
+    [ -f "${ADVANCED_FILE}" ] || write_default_advanced
+
+    # Save installed version
+    echo "${PACKAGE_VERSION}" > "${VERSION_STATE_FILE}"
+
+    # Restrictive permissions: these files guide a security mechanism.
     chmod 700 "${BLACKLIST_DIR}"
-    chmod 600 "${BLACKLIST_FILE}"
-    chown root:root "${BLACKLIST_DIR}" "${BLACKLIST_FILE}"
+    chmod 600 "${BLACKLIST_FILE}" "${ADVANCED_FILE}" "${VERSION_STATE_FILE}"
+    chown root:root "${BLACKLIST_DIR}" "${BLACKLIST_FILE}" "${ADVANCED_FILE}" "${VERSION_STATE_FILE}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# RESTORE UDEV ADVANCED PROTECTION RULES (IF CONFIGURED)
+# ─────────────────────────────────────────────────────────────────────────────
+
+setup_udev_rules() {
+    [ -f "${ADVANCED_FILE}" ] || return 0
+
+    local entries
+    entries=$(grep -v '^\s*#' "${ADVANCED_FILE}" \
+        | grep -v '^\s*$' \
+        | awk '{print tolower($1)}' \
+        | grep -E '^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$' \
+        || true)
+
+    if [ -z "${entries}" ]; then
+        return 0
+    fi
+
+    info "Restoring Udev Advanced Protection rules in ${UDEV_RULES_FILE}..."
+    mkdir -p "$(dirname "${UDEV_RULES_FILE}")"
+    {
+        echo "# Generated by usb-blacklist-watcher-pve — DO NOT EDIT MANUALLY"
+        echo "# Manage with: usb-blacklist-select-pve"
+        echo ""
+        local id
+        while IFS= read -r id; do
+            [ -z "${id}" ] && continue
+            local vendor="${id%%:*}"
+            local product="${id##*:}"
+            echo "# Protezione dispositivo USB (${id})"
+            echo "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"${vendor}\", ATTR{idProduct}==\"${product}\", RUN+=\"/bin/rm -f \$env{DEVNAME}\""
+            echo ""
+        done <<< "${entries}"
+    } > "${UDEV_RULES_FILE}"
+
+    chmod 644 "${UDEV_RULES_FILE}"
+    chown root:root "${UDEV_RULES_FILE}"
+
+    if command -v udevadm &>/dev/null; then
+        udevadm control --reload-rules && udevadm trigger --subsystem-match=usb || true
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -89,6 +228,11 @@ setup_service() {
         warn "pve-cluster might need to be mounted first."
         warn "Start manually with: systemctl start ${SERVICE_NAME}"
     }
+
+    # Restart if already running so updated daemon script takes effect on upgrades
+    if systemctl is-active --quiet "${SERVICE_NAME}" 2>/dev/null; then
+        systemctl restart "${SERVICE_NAME}" || true
+    fi
 }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -100,17 +244,26 @@ print_welcome() {
     echo "┌─────────────────────────────────────────────────────────────┐"
     echo "│       usb-blacklist-watcher-pve installed successfully      │"
     echo "├─────────────────────────────────────────────────────────────┤"
-    echo "│                                                               │"
-    echo "│  To choose which USB devices to protect, run:                │"
-    echo "│                                                               │"
-    echo "│      usb-blacklist-select                                     │"
-    echo "│                                                               │"
-    echo "│  To check watcher status:                                     │"
-    echo "│      systemctl status usb-blacklist-watcher-pve               │"
-    echo "│                                                               │"
-    echo "│  Blacklist:  /etc/usb-blacklist-watcher-pve/blacklist.conf    │"
-    echo "│  Logs:       journalctl -u usb-blacklist-watcher-pve -f       │"
-    echo "│                                                               │"
+    if [ -n "${UPGRADE_SUMMARY}" ]; then
+        printf "│  %-59s│\n" "${UPGRADE_SUMMARY}"
+        echo "├─────────────────────────────────────────────────────────────┤"
+    fi
+    echo "│                                                             │"
+    if [ "${RECONFIG_REQUIRED}" -eq 1 ]; then
+        echo "│  ! Configuration required — run:                            │"
+    else
+        echo "│  To modify protected USB devices at any time, run:          │"
+    fi
+    echo "│                                                             │"
+    echo "│      usb-blacklist-select-pve                               │"
+    echo "│                                                             │"
+    echo "│  To check watcher status:                                   │"
+    echo "│      systemctl status usb-blacklist-watcher-pve             │"
+    echo "│                                                             │"
+    echo "│  Blacklist:  /etc/usb-blacklist-watcher-pve/blacklist.conf  │"
+    echo "│  Adv. Prot.: /etc/usb-blacklist-watcher-pve/advanced.conf   │"
+    echo "│  Logs:       journalctl -u usb-blacklist-watcher-pve -f     │"
+    echo "│                                                             │"
     echo "└─────────────────────────────────────────────────────────────┘"
     echo ""
 }
@@ -121,7 +274,8 @@ print_welcome() {
 
 case "${1:-}" in
     configure)
-        setup_config_dir
+        setup_config_dir "${2:-}"
+        setup_udev_rules
         setup_service
         print_welcome
         ;;

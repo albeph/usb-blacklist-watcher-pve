@@ -4,6 +4,7 @@ set -euo pipefail
 
 SERVICE_NAME="usb-blacklist-watcher-pve.service"
 OLD_SERVICE_NAME="usb-blacklist-watcher.service"
+UDEV_RULES_FILE="/etc/udev/rules.d/99-usb-blacklist-watcher-pve.rules"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UTILITIES
@@ -39,12 +40,26 @@ stop_service() {
     fi
 }
 
+cleanup_udev_rules() {
+    if [ -f "${UDEV_RULES_FILE}" ]; then
+        info "Removing Udev Advanced Protection rules: ${UDEV_RULES_FILE}..."
+        rm -f "${UDEV_RULES_FILE}"
+        if command -v udevadm &>/dev/null; then
+            udevadm control --reload-rules && udevadm trigger --subsystem-match=usb || true
+        fi
+    fi
+}
+
 # ─────────────────────────────────────────────────────────────────────────────
 # MAIN
 # ─────────────────────────────────────────────────────────────────────────────
 
 case "${1:-}" in
-    remove|upgrade|deconfigure|failed-upgrade)
+    remove|deconfigure)
+        stop_service
+        cleanup_udev_rules
+        ;;
+    upgrade|failed-upgrade)
         stop_service
         ;;
     *)

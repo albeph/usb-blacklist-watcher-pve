@@ -1,0 +1,44 @@
+#!/bin/bash
+# preinst — executed by dpkg BEFORE package unpack/upgrade
+set -euo pipefail
+
+BLACKLIST_DIR="/etc/usb-blacklist-watcher-pve"
+BLACKLIST_FILE="${BLACKLIST_DIR}/blacklist.conf"
+ADVANCED_FILE="${BLACKLIST_DIR}/advanced.conf"
+
+info() { echo "  [usb-blacklist-watcher-pve] $*"; }
+
+backup_existing_configs() {
+    local old_version="${1:-}"
+
+    if [ ! -d "${BLACKLIST_DIR}" ]; then
+        return 0
+    fi
+
+    # Record previous version for postinst
+    if [ -n "${old_version}" ]; then
+        echo "${old_version}" > "${BLACKLIST_DIR}/.old_version"
+        chmod 600 "${BLACKLIST_DIR}/.old_version"
+    fi
+
+    # Back up existing configuration files before dpkg unpacks package files
+    if [ -f "${BLACKLIST_FILE}" ]; then
+        cp -a "${BLACKLIST_FILE}" "${BLACKLIST_DIR}/.blacklist.conf.preinst_bak"
+    fi
+
+    if [ -f "${ADVANCED_FILE}" ]; then
+        cp -a "${ADVANCED_FILE}" "${BLACKLIST_DIR}/.advanced.conf.preinst_bak"
+    fi
+}
+
+case "${1:-}" in
+    upgrade|install)
+        backup_existing_configs "${2:-}"
+        ;;
+    abort-upgrade)
+        ;;
+    *)
+        ;;
+esac
+
+exit 0

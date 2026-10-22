@@ -1,1 +1,1130 @@
-usb-blacklist-select
+#!/bin/bash
+# usb-blacklist-select-pve — Interactive tool to manage the USB blacklist & Advanced Protection
+#
+# Interactive usage:
+#   usb-blacklist-select-pve
+#
+# Non-interactive usage (scripting):
+#   usb-blacklist-select-pve --list
+#   usb-blacklist-select-pve --add VENDOR:PRODUCT
+#   usb-blacklist-select-pve --remove VENDOR:PRODUCT
+#   usb-blacklist-select-pve --advanced-list
+#   usb-blacklist-select-pve --advanced-add VENDOR:PRODUCT
+#   usb-blacklist-select-pve --advanced-remove VENDOR:PRODUCT
+#
+# The tool saves the blacklist to /etc/usb-blacklist-watcher-pve/blacklist.conf,
+# immediately triggers enforcement across all configured VMs, and manages
+# optional Udev-based Advanced Protection (/etc/udev/rules.d/99-usb-blacklist-watcher-pve.rules)
+# to remove raw USB nodes (/dev/bus/usb/XXX/YYY) for critical host devices.
+
+set -euo pipefail
+
+# ─────────────────────────────────────────────────────────────────────────────
+# CONFIGURATION
+# ─────────────────────────────────────────────────────────────────────────────
+
+readonly BLACKLIST_DIR="${USB_BLACKLIST_DIR:-/etc/usb-blacklist-watcher-pve}"
+readonly BLACKLIST_FILE="${BLACKLIST_DIR}/blacklist.conf"
+readonly ADVANCED_FILE="${BLACKLIST_DIR}/advanced.conf"
+readonly UDEV_RULES_FILE="${USB_UDEV_RULES_FILE:-/etc/udev/rules.d/99-usb-blacklist-watcher-pve.rules}"
+readonly QEMU_DIR="${USB_QEMU_DIR:-/etc/pve/qemu-server}"
+
+# Linux Foundation root hubs and generic hubs to filter out (optional)
+readonly FILTER_IDS=("1d6b:0001" "1d6b:0002" "1d6b:0003")
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UI / ANSI COLORS & UTILITIES
+# ─────────────────────────────────────────────────────────────────────────────
+
+readonly C_RESET="\e[0m"
+readonly C_BOLD="\e[1m"
+readonly C_DIM="\e[2m"
+readonly C_GREEN="\e[1;32m"
+readonly C_YELLOW="\e[1;33m"
+readonly C_RED="\e[1;31m"
+readonly C_CYAN="\e[1;36m"
+readonly C_MAGENTA="\e[1;35m"
+readonly C_WHITE="\e[1;37m"
+
+info()    { echo -e "  ${C_GREEN}✓${C_RESET} $*"; }
+warn()    { echo -e "  ${C_YELLOW}⚠ $*${C_RESET}" >&2; }
+error()   { echo -e "  ${C_RED}✗ $*${C_RESET}" >&2; }
+section() { echo ""; echo -e "${C_BOLD}── $* ──────────────────────────────────────────────────────${C_RESET}"; }
+
+step_banner_1() {
+    echo ""
+    echo -e "${C_DIM}══════════════════════════════════════════════════════════════════════${C_RESET}"
+    echo ""
+    echo -e "${C_CYAN}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${C_RESET}"
+    echo -e "${C_CYAN}┃  STEP 1 of 2  •  STANDARD BLACKLIST (VM Configuration Protection)  ┃${C_RESET}"
+    echo -e "${C_CYAN}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${C_RESET}"
+}
+
+step_banner_2() {
+    echo ""
+    echo ""
+    echo -e "${C_MAGENTA}══════════════════════════════════════════════════════════════════════${C_RESET}"
+    echo -e "${C_MAGENTA}                        PROCEEDING TO STEP 2                          ${C_RESET}"
+    echo -e "${C_MAGENTA}══════════════════════════════════════════════════════════════════════${C_RESET}"
+    echo ""
+    echo -e "${C_MAGENTA}┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓${C_RESET}"
+    echo -e "${C_MAGENTA}┃  STEP 2 of 2  •  ADVANCED PROTECTION (Udev /dev/bus/usb Block)     ┃${C_RESET}"
+    echo -e "${C_MAGENTA}┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛${C_RESET}"
+}
+
+# Verify that current user is root
+check_root() {
+    if [ "${EUID:-$(id -u)}" -ne 0 ]; then
+        error "This tool must be run as root."
+        echo "    Try again with: sudo usb-blacklist-select-pve $*"
+        exit 1
+    fi
+}
+
+# Validate VENDOR:PRODUCT format (4 hex digits : 4 hex digits)
+validate_usb_id() {
+    local id="${1}"
+    if [[ ! "${id}" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
+        error "Invalid USB ID format: '${id}'"
+        error "Expected format: VENDOR:PRODUCT in hexadecimal (e.g. 2e8a:0005)"
+        return 1
+    fi
+    # Normalize to lowercase
+    echo "${id,,}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# BLACKLIST & ADVANCED PROTECTION FILE MANAGEMENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Ensure configuration directory and blacklist file exist
+ensure_blacklist_file() {
+    if [ ! -d "${BLACKLIST_DIR}" ]; then
+        mkdir -p "${BLACKLIST_DIR}"
+        chmod 700 "${BLACKLIST_DIR}"
+        chown root:root "${BLACKLIST_DIR}"
+    fi
+
+    if [ ! -f "${BLACKLIST_FILE}" ]; then
+        cat > "${BLACKLIST_FILE}" <<'EOF'
+# usb-blacklist-watcher-pve — USB Device Blacklist
+#
+# Format: VENDOR:PRODUCT  # optional comment
+# Blank lines and lines starting with '#' are ignored.
+#
+EOF
+        chmod 600 "${BLACKLIST_FILE}"
+        chown root:root "${BLACKLIST_FILE}"
+    fi
+}
+
+# Ensure advanced protection state file exists
+ensure_advanced_file() {
+    ensure_blacklist_file
+
+    if [ ! -f "${ADVANCED_FILE}" ]; then
+        cat > "${ADVANCED_FILE}" <<'EOF'
+# usb-blacklist-watcher-pve — USB Advanced Protection (Udev Raw Node Block)
+#
+# Format: VENDOR:PRODUCT  # optional comment
+# Blank lines and lines starting with '#' are ignored.
+#
+EOF
+        chmod 600 "${ADVANCED_FILE}"
+        chown root:root "${ADVANCED_FILE}"
+    fi
+}
+
+# Reads the blacklist and returns IDs (VENDOR:PRODUCT) one per line,
+# normalized to lowercase.
+read_blacklist() {
+    if [ ! -f "${BLACKLIST_FILE}" ]; then
+        return 0
+    fi
+    grep -v '^\s*#' "${BLACKLIST_FILE}" \
+        | grep -v '^\s*$' \
+        | awk '{print tolower($1)}' \
+        | grep -E '^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$' \
+        || true
+}
+
+# Reads the advanced protection list and returns IDs (VENDOR:PRODUCT) one per line,
+# normalized to lowercase.
+read_advanced() {
+    if [ ! -f "${ADVANCED_FILE}" ]; then
+        return 0
+    fi
+    grep -v '^\s*#' "${ADVANCED_FILE}" \
+        | grep -v '^\s*$' \
+        | awk '{print tolower($1)}' \
+        | grep -E '^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$' \
+        || true
+}
+
+# Checks if an ID is in the blacklist. Returns 0 if found, 1 otherwise.
+is_in_blacklist() {
+    local id="${1,,}"
+    local cached_blacklist="${2:-$(read_blacklist)}"
+    echo "${cached_blacklist}" | grep -qi "^${id}$"
+}
+
+# Checks if an ID has Advanced Protection enabled. Returns 0 if found, 1 otherwise.
+is_in_advanced() {
+    local id="${1,,}"
+    local cached_advanced="${2:-$(read_advanced)}"
+    echo "${cached_advanced}" | grep -qi "^${id}$"
+}
+
+# Extracts the inline comment/description for an ID from a config file if present.
+get_saved_comment() {
+    local id="${1,,}"
+    local file="${2}"
+    if [ ! -f "${file}" ]; then
+        return 0
+    fi
+    grep -i "^${id}\b" "${file}" 2>/dev/null \
+        | head -1 \
+        | sed -n 's/^[^#]*#\s*//p' \
+        | xargs \
+        || true
+}
+
+# Resolves human-readable description for a VENDOR:PRODUCT ID.
+# Checks discovered USB devices first, then saved comments in config files, then lsusb.
+get_device_description() {
+    local id="${1,,}"
+    local desc=""
+
+    # 1. Check in-memory discovered USB devices array if populated
+    if [ "${USB_COUNT:-0}" -gt 0 ]; then
+        local j
+        for (( j=0; j<USB_COUNT; j++ )); do
+            if [ "${USB_IDS[$j]}" = "${id}" ]; then
+                desc="${USB_DESCS[$j]}"
+                break
+            fi
+        done
+    fi
+
+    # 2. Check saved comment in blacklist.conf or advanced.conf
+    if [ -z "${desc}" ]; then
+        desc=$(get_saved_comment "${id}" "${BLACKLIST_FILE}")
+    fi
+    if [ -z "${desc}" ]; then
+        desc=$(get_saved_comment "${id}" "${ADVANCED_FILE}")
+    fi
+
+    # 3. Fallback to lsusb query
+    if [ -z "${desc}" ] && command -v lsusb &>/dev/null; then
+        desc=$(lsusb 2>/dev/null \
+            | grep -i "${id}" \
+            | sed -E 's/.*ID [0-9a-fA-F]{4}:[0-9a-fA-F]{4}\s*//' \
+            | head -1 \
+            | xargs \
+            || true)
+    fi
+
+    echo "${desc}"
+}
+
+# Adds an ID to the blacklist (if not already present).
+# Arguments: id [optional description]
+blacklist_add() {
+    local id="${1,,}"
+    local desc="${2:-}"
+
+    ensure_blacklist_file
+
+    if is_in_blacklist "${id}"; then
+        warn "${id} is already in blacklist — no changes."
+        return 0
+    fi
+
+    local comment=""
+    [ -n "${desc}" ] && comment=" # ${desc}"
+
+    echo "${id}${comment}" >> "${BLACKLIST_FILE}"
+    chmod 600 "${BLACKLIST_FILE}"
+    info "Added to blacklist: ${id}${comment}"
+}
+
+# Removes an ID from the blacklist (and from Advanced Protection if active).
+blacklist_remove() {
+    local id="${1,,}"
+
+    ensure_blacklist_file
+
+    if ! is_in_blacklist "${id}"; then
+        warn "${id} is not in blacklist — no changes."
+        return 0
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp)
+    grep -iv "^${id}\b" "${BLACKLIST_FILE}" > "${tmp_file}" || true
+    mv "${tmp_file}" "${BLACKLIST_FILE}"
+    chmod 600 "${BLACKLIST_FILE}"
+    chown root:root "${BLACKLIST_FILE}"
+    info "Removed from blacklist: ${id}"
+
+    # If the device also had Advanced Protection enabled, remove it automatically
+    if is_in_advanced "${id}"; then
+        advanced_remove "${id}"
+    fi
+}
+
+# Adds an ID to Advanced Protection (if not already present).
+# Arguments: id [optional description]
+advanced_add() {
+    local id="${1,,}"
+    local desc="${2:-}"
+
+    ensure_advanced_file
+
+    if is_in_advanced "${id}"; then
+        warn "${id} already has Advanced Protection enabled — no changes."
+        return 0
+    fi
+
+    local comment=""
+    [ -n "${desc}" ] && comment=" # ${desc}"
+
+    echo "${id}${comment}" >> "${ADVANCED_FILE}"
+    chmod 600 "${ADVANCED_FILE}"
+    info "Advanced Protection enabled for: ${id}${comment}"
+}
+
+# Removes an ID from Advanced Protection.
+advanced_remove() {
+    local id="${1,,}"
+
+    ensure_advanced_file
+
+    if ! is_in_advanced "${id}"; then
+        warn "${id} does not have Advanced Protection enabled — no changes."
+        return 0
+    fi
+
+    local tmp_file
+    tmp_file=$(mktemp)
+    grep -iv "^${id}\b" "${ADVANCED_FILE}" > "${tmp_file}" || true
+    mv "${tmp_file}" "${ADVANCED_FILE}"
+    chmod 600 "${ADVANCED_FILE}"
+    chown root:root "${ADVANCED_FILE}"
+    info "Advanced Protection disabled for: ${id}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# UDEV ADVANCED PROTECTION MANAGEMENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Finds raw USB device paths (/dev/bus/usb/BBB/DDD) expected for a connected
+# VENDOR:PRODUCT by inspecting sysfs (/sys/bus/usb/devices/).
+get_expected_raw_nodes() {
+    local target_id="${1,,}"
+    local target_vendor="${target_id%%:*}"
+    local target_product="${target_id##*:}"
+    local dev_dir
+
+    for dev_dir in /sys/bus/usb/devices/*; do
+        [ -f "${dev_dir}/idVendor" ] && [ -f "${dev_dir}/idProduct" ] || continue
+        [ -f "${dev_dir}/busnum" ] && [ -f "${dev_dir}/devnum" ] || continue
+
+        local v p
+        v=$(tr '[:upper:]' '[:lower:]' < "${dev_dir}/idVendor" | tr -d '[:space:]')
+        p=$(tr '[:upper:]' '[:lower:]' < "${dev_dir}/idProduct" | tr -d '[:space:]')
+
+        if [ "${v}" = "${target_vendor}" ] && [ "${p}" = "${target_product}" ]; then
+            local busnum devnum
+            busnum=$(cat "${dev_dir}/busnum")
+            devnum=$(cat "${dev_dir}/devnum")
+            printf "/dev/bus/usb/%03d/%03d\n" "${busnum}" "${devnum}"
+        fi
+    done
+}
+
+# Synchronizes /etc/udev/rules.d/99-usb-blacklist-watcher-pve.rules from advanced.conf
+# and applies rules immediately via udevadm without rebooting.
+apply_udev_rules() {
+    section "Applying Udev rules (Advanced Protection)"
+
+    ensure_advanced_file
+
+    local current_blacklist current_advanced
+    current_blacklist=$(read_blacklist)
+    current_advanced=$(read_advanced)
+
+    # Collect valid advanced IDs (must also be in blacklist)
+    local valid_ids=()
+    if [ -n "${current_advanced}" ]; then
+        local id
+        while IFS= read -r id; do
+            [ -z "${id}" ] && continue
+            if is_in_blacklist "${id}" "${current_blacklist}"; then
+                valid_ids+=("${id}")
+            else
+                # Clean up orphan entry not in blacklist
+                advanced_remove "${id}"
+            fi
+        done <<< "${current_advanced}"
+    fi
+
+    if [ "${#valid_ids[@]}" -eq 0 ]; then
+        if [ -f "${UDEV_RULES_FILE}" ]; then
+            rm -f "${UDEV_RULES_FILE}"
+            info "Removed Udev rules file: ${UDEV_RULES_FILE}"
+            if command -v udevadm &>/dev/null; then
+                udevadm control --reload-rules && udevadm trigger --subsystem-match=usb
+                info "Udev rules reloaded — raw /dev/bus/usb/* nodes restored."
+            fi
+        else
+            info "No devices with active Advanced Protection."
+        fi
+        return 0
+    fi
+
+    # Write udev rules file
+    local rules_dir
+    rules_dir=$(dirname "${UDEV_RULES_FILE}")
+    mkdir -p "${rules_dir}"
+
+    {
+        echo "# Generated by usb-blacklist-watcher-pve — DO NOT EDIT MANUALLY"
+        echo "# Manage with: usb-blacklist-select-pve"
+        echo "#"
+        echo "# Removes the raw USB device node (/dev/bus/usb/XXX/YYY) so that neither"
+        echo "# QEMU/KVM nor root can issue USBDEVFS_DISCONNECT to detach the host kernel"
+        echo "# driver (preserving /dev/sdX, /dev/ttyACM*, etc.)."
+        echo ""
+
+        local id
+        for id in "${valid_ids[@]}"; do
+            local vendor="${id%%:*}"
+            local product="${id##*:}"
+            local desc
+            desc=$(get_device_description "${id}")
+            if [ -n "${desc}" ]; then
+                echo "# Protection: ${desc} (${id})"
+            else
+                echo "# Protection: USB device (${id})"
+            fi
+            echo "SUBSYSTEM==\"usb\", ATTR{idVendor}==\"${vendor}\", ATTR{idProduct}==\"${product}\", RUN+=\"/bin/rm -f \$env{DEVNAME}\""
+            echo ""
+        done
+    } > "${UDEV_RULES_FILE}"
+
+    chmod 644 "${UDEV_RULES_FILE}"
+    chown root:root "${UDEV_RULES_FILE}"
+    info "Udev rules file updated: ${UDEV_RULES_FILE}"
+
+    if command -v udevadm &>/dev/null; then
+        if udevadm control --reload-rules && udevadm trigger --subsystem-match=usb; then
+            info "Udev rules applied live (udevadm reload-rules & trigger)."
+        else
+            warn "Error executing udevadm."
+        fi
+    else
+        warn "Command 'udevadm' not found — rules will take effect on next reboot."
+    fi
+
+    # Verify raw nodes for protected devices currently connected
+    local id
+    for id in "${valid_ids[@]}"; do
+        local nodes
+        nodes=$(get_expected_raw_nodes "${id}")
+        if [ -z "${nodes}" ]; then
+            continue
+        fi
+        local node
+        while IFS= read -r node; do
+            [ -z "${node}" ] && continue
+            if [ ! -e "${node}" ]; then
+                info "Check ${id}: raw node ${node} successfully removed (protected)."
+            else
+                warn "Check ${id}: raw node ${node} still present."
+            fi
+        done <<< "${nodes}"
+    done
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# USB DEVICE DISCOVERY
+# ─────────────────────────────────────────────────────────────────────────────
+
+discover_usb_devices() {
+    if ! command -v lsusb &>/dev/null; then
+        error "Command 'lsusb' not found. Please install usbutils."
+        exit 1
+    fi
+
+    USB_IDS=()
+    USB_DESCS=()
+    USB_COUNT=0
+
+    while IFS= read -r line; do
+        local id desc
+        id=$(echo "${line}" | grep -oP 'ID \K[0-9a-fA-F]{4}:[0-9a-fA-F]{4}' | tr '[:upper:]' '[:lower:]' || true)
+        desc=$(echo "${line}" | sed -E 's/.*ID [0-9a-fA-F]{4}:[0-9a-fA-F]{4}\s*//' | xargs || true)
+
+        [ -z "${id}" ] && continue
+
+        local skip=0
+        local filter_id
+        for filter_id in "${FILTER_IDS[@]}"; do
+            if [ "${id}" = "${filter_id}" ]; then
+                skip=1
+                break
+            fi
+        done
+        [ "${skip}" -eq 1 ] && continue
+
+        USB_IDS+=("${id}")
+        USB_DESCS+=("${desc}")
+        (( USB_COUNT++ )) || true
+
+    done < <(lsusb 2>/dev/null)
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# DISPLAY
+# ─────────────────────────────────────────────────────────────────────────────
+
+show_usb_list() {
+    local cached_blacklist="${1:-$(read_blacklist)}"
+    local cached_advanced="${2:-$(read_advanced)}"
+    section "Connected host USB devices"
+
+    if [ "${USB_COUNT}" -eq 0 ]; then
+        warn "No USB devices found (excluding hubs and root hubs)."
+        return 0
+    fi
+
+    local i
+    for (( i=0; i<USB_COUNT; i++ )); do
+        local id="${USB_IDS[$i]}"
+        local desc="${USB_DESCS[$i]}"
+        local idx=$(( i + 1 ))
+        local marker=""
+
+        if is_in_blacklist "${id}" "${cached_blacklist}"; then
+            marker=" ${C_YELLOW}[ALREADY IN BLACKLIST]${C_RESET}"
+        fi
+        if is_in_advanced "${id}" "${cached_advanced}"; then
+            marker="${marker} ${C_MAGENTA}[⚡ ADVANCED PROTECTION]${C_RESET}"
+        fi
+
+        printf "  ${C_BOLD}%3d${C_RESET})  ${C_CYAN}%-15s${C_RESET}  %s%b\n" \
+            "${idx}" "${id}" "${desc}" "${marker}"
+    done
+}
+
+show_blacklist() {
+    local entries="${1:-$(read_blacklist)}"
+    local cached_advanced="${2:-$(read_advanced)}"
+    section "Current Blacklist Status"
+
+    if [ -z "${entries}" ]; then
+        echo -e "  ${C_DIM}(empty)${C_RESET}"
+        return 0
+    fi
+
+    local id
+    while IFS= read -r id; do
+        [ -z "${id}" ] && continue
+        local desc=""
+        local connected=0
+        local j
+        for (( j=0; j<USB_COUNT; j++ )); do
+            if [ "${USB_IDS[$j]}" = "${id}" ]; then
+                desc="${USB_DESCS[$j]}"
+                connected=1
+                break
+            fi
+        done
+
+        if [ -z "${desc}" ]; then
+            desc=$(get_saved_comment "${id}" "${BLACKLIST_FILE}")
+            if [ -n "${desc}" ] && [ "${connected}" -eq 0 ]; then
+                desc="${desc} (not connected)"
+            fi
+        fi
+
+        local adv_marker=""
+        if is_in_advanced "${id}" "${cached_advanced}"; then
+            adv_marker=" ${C_MAGENTA}[⚡ ADVANCED PROTECTION]${C_RESET}"
+        fi
+
+        printf "  ${C_RED}●${C_RESET}  ${C_CYAN}%-15s${C_RESET}  %s%b\n" \
+            "${id}" "${desc:-<device not connected>}" "${adv_marker}"
+    done <<< "${entries}"
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# IMMEDIATE ENFORCEMENT
+# ─────────────────────────────────────────────────────────────────────────────
+
+trigger_enforcement() {
+    section "Immediate VM enforcement"
+
+    if ! command -v qm &>/dev/null; then
+        warn "Command 'qm' not found — skipping automatic enforcement."
+        warn "The watcher will apply changes on next service restart."
+        return 0
+    fi
+
+    if [ ! -d "${QEMU_DIR}" ]; then
+        warn "Directory ${QEMU_DIR} not found — is pve-cluster mounted?"
+        return 0
+    fi
+
+    local current_blacklist
+    current_blacklist=$(read_blacklist)
+
+    if [ -z "${current_blacklist}" ]; then
+        info "Blacklist is empty — no enforcement needed."
+        return 0
+    fi
+
+    local conf_file vmid found_action=0
+
+    for conf_file in "${QEMU_DIR}"/*.conf; do
+        [ -f "${conf_file}" ] || continue
+        vmid=$(basename "${conf_file}" .conf)
+        [[ "${vmid}" =~ ^[0-9]+$ ]] || continue
+
+        local line
+        while IFS= read -r line; do
+            local key
+            key=$(echo "${line}" | grep -oP "^usb\d+" || true)
+            [ -z "${key}" ] && continue
+
+            local host_val
+            host_val=$(echo "${line}" | grep -oP "host=\K[^, ]+" || true)
+            [ -z "${host_val}" ] && continue
+
+            local actual_id=""
+            if [[ "${host_val}" =~ ^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$ ]]; then
+                actual_id="${host_val,,}"
+            elif [[ "${host_val}" =~ ^[0-9]+-[0-9]+(\.[0-9]+)*$ ]]; then
+                local sysfs_dir="/sys/bus/usb/devices/${host_val}"
+                if [ -f "${sysfs_dir}/idVendor" ] && [ -f "${sysfs_dir}/idProduct" ]; then
+                    local vendor product
+                    vendor=$(cat "${sysfs_dir}/idVendor")
+                    product=$(cat "${sysfs_dir}/idProduct")
+                    actual_id="${vendor,,}:${product,,}"
+                fi
+            fi
+
+            [ -z "${actual_id}" ] && continue
+
+            if echo "${current_blacklist}" | grep -qi "^${actual_id}$"; then
+                echo "  → VM ${vmid}: removing '${key}' (host=${host_val})..."
+                qm set "${vmid}" --delete "${key}" 2>&1 | sed 's/^/    /' || \
+                    warn "Error removing '${key}' from VM ${vmid}"
+                found_action=1
+            fi
+        done < <(grep -iP "^usb\d+:" "${conf_file}" || true)
+    done
+
+    if [ "${found_action}" -eq 0 ]; then
+        info "No blacklisted devices found in VM configurations."
+    else
+        info "Enforcement completed."
+    fi
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# INTERACTIVE MODE
+# ─────────────────────────────────────────────────────────────────────────────
+
+interactive_advanced_step() {
+    local current_blacklist current_advanced
+    current_blacklist=$(read_blacklist)
+    current_advanced=$(read_advanced)
+
+    step_banner_2
+
+    if [ -z "${current_blacklist}" ]; then
+        echo ""
+        info "The blacklist is empty: no devices available for Advanced Protection."
+        return 0
+    fi
+
+    echo ""
+    echo -e "  ${C_DIM}Advanced Protection creates a Udev rule that removes the raw USB node${C_RESET}"
+    echo -e "  ${C_DIM}(/dev/bus/usb/XXX/YYY) while keeping kernel drivers (/dev/sdX,${C_RESET}"
+    echo -e "  ${C_DIM}/dev/ttyACM0) intact. It prevents root/KVM from detaching host drivers.${C_RESET}"
+    echo ""
+    echo -e "  ${C_BOLD}Currently blacklisted devices:${C_RESET}"
+    echo ""
+
+    local bl_ids=()
+    local bl_descs=()
+    local bl_count=0
+    local id
+
+    while IFS= read -r id; do
+        [ -z "${id}" ] && continue
+        local desc
+        desc=$(get_device_description "${id}")
+        bl_ids+=("${id}")
+        bl_descs+=("${desc}")
+        (( bl_count++ )) || true
+
+        local idx="${bl_count}"
+        local marker=""
+        if is_in_advanced "${id}" "${current_advanced}"; then
+            marker=" ${C_MAGENTA}[⚡ ADVANCED PROTECTION ACTIVE]${C_RESET}"
+        fi
+
+        printf "  ${C_BOLD}%3d${C_RESET})  ${C_CYAN}%-15s${C_RESET}  %s%b\n" \
+            "${idx}" "${id}" "${desc:-<device not connected>}" "${marker}"
+    done <<< "${current_blacklist}"
+
+    echo ""
+    echo -e "  ${C_MAGENTA}╭─ INPUT REQUEST (STEP 2/2 — ADVANCED PROTECTION) ───────────────────╮${C_RESET}"
+    echo -e "  ${C_MAGENTA}│${C_RESET} • Enter device numbers to enable/disable the Udev block             ${C_MAGENTA}│${C_RESET}"
+    echo -e "  ${C_MAGENTA}│${C_RESET}   (separated by space or comma).                                   ${C_MAGENTA}│${C_RESET}"
+    echo -e "  ${C_MAGENTA}│${C_RESET} • Press ${C_WHITE}ENTER${C_RESET} without typing anything to finish without changes.   ${C_MAGENTA}│${C_RESET}"
+    echo -e "  ${C_MAGENTA}╰────────────────────────────────────────────────────────────────────╯${C_RESET}"
+    printf "  ${C_YELLOW}❯ Advanced Protection selection [1-${bl_count} or ENTER]: ${C_RESET}"
+    read -r adv_input
+
+    if [ -z "${adv_input}" ]; then
+        echo ""
+        info "No changes to Advanced Protection."
+        return 0
+    fi
+
+    local normalized_adv
+    normalized_adv=$(echo "${adv_input}" | tr ',' ' ' | tr -s ' ')
+
+    local to_protect=()
+    local to_protect_descs=()
+    local to_unprotect=()
+
+    local num
+    for num in ${normalized_adv}; do
+        if [[ ! "${num}" =~ ^[0-9]+$ ]]; then
+            warn "Ignored invalid value: '${num}'"
+            continue
+        fi
+
+        local idx=$(( num - 1 ))
+        if [ "${idx}" -lt 0 ] || [ "${idx}" -ge "${bl_count}" ]; then
+            warn "Ignored out-of-range number: ${num} (range: 1-${bl_count})"
+            continue
+        fi
+
+        local sel_id="${bl_ids[$idx]}"
+        local sel_desc="${bl_descs[$idx]}"
+
+        if is_in_advanced "${sel_id}" "${current_advanced}"; then
+            to_unprotect+=("${sel_id}")
+        else
+            to_protect+=("${sel_id}")
+            to_protect_descs+=("${sel_desc}")
+        fi
+    done
+
+    if [ "${#to_protect[@]}" -eq 0 ] && [ "${#to_unprotect[@]}" -eq 0 ]; then
+        echo ""
+        warn "No changes to Advanced Protection to apply."
+        return 0
+    fi
+
+    section "Advanced Protection changes summary"
+
+    if [ "${#to_protect[@]}" -gt 0 ]; then
+        echo -e "  ${C_MAGENTA}To ENABLE (removal of raw node /dev/bus/usb):${C_RESET}"
+        local i
+        for (( i=0; i<${#to_protect[@]}; i++ )); do
+            printf "    ${C_GREEN}+${C_RESET} ${C_CYAN}%-15s${C_RESET}  %s\n" "${to_protect[$i]}" "${to_protect_descs[$i]}"
+        done
+    fi
+
+    if [ "${#to_unprotect[@]}" -gt 0 ]; then
+        echo -e "  ${C_YELLOW}To DISABLE (restoration of raw node /dev/bus/usb):${C_RESET}"
+        for id in "${to_unprotect[@]}"; do
+            printf "    ${C_RED}-${C_RESET} ${C_CYAN}%-15s${C_RESET}\n" "${id}"
+        done
+    fi
+
+    echo ""
+    printf "  ${C_YELLOW}❯ Confirm changes to Advanced Protection? [y/N]: ${C_RESET}"
+    read -r confirm_adv
+
+    if [[ ! "${confirm_adv,,}" =~ ^(y|yes|s|si)$ ]]; then
+        echo ""
+        info "Advanced Protection changes cancelled."
+        return 0
+    fi
+
+    local i
+    for (( i=0; i<${#to_protect[@]}; i++ )); do
+        advanced_add "${to_protect[$i]}" "${to_protect_descs[$i]}"
+    done
+
+    for id in "${to_unprotect[@]}"; do
+        advanced_remove "${id}"
+    done
+
+    apply_udev_rules
+
+    # Verify restored nodes for unprotected devices if connected
+    for id in "${to_unprotect[@]}"; do
+        local nodes
+        nodes=$(get_expected_raw_nodes "${id}")
+        [ -z "${nodes}" ] && continue
+        local node
+        while IFS= read -r node; do
+            [ -z "${node}" ] && continue
+            if [ -e "${node}" ]; then
+                info "Check ${id}: raw node ${node} successfully restored (unlocked)."
+            fi
+        done <<< "${nodes}"
+    done
+}
+
+interactive_mode() {
+    echo ""
+    echo -e "${C_GREEN}╔══════════════════════════════════════════════════════════════════════╗${C_RESET}"
+    echo -e "${C_GREEN}║          usb-blacklist-select-pve — USB Protection Management        ║${C_RESET}"
+    echo -e "${C_GREEN}╚══════════════════════════════════════════════════════════════════════╝${C_RESET}"
+
+    discover_usb_devices
+
+    local current_blacklist current_advanced
+    current_blacklist=$(read_blacklist)
+    current_advanced=$(read_advanced)
+
+    if [ "${USB_COUNT}" -eq 0 ] && [ -z "${current_blacklist}" ]; then
+        echo ""
+        warn "No selectable USB devices found."
+        exit 0
+    fi
+
+    # ── STEP 1 / 2 ───────────────────────────────────────────────────────────
+    step_banner_1
+    show_usb_list "${current_blacklist}" "${current_advanced}"
+    show_blacklist "${current_blacklist}" "${current_advanced}"
+
+    if [ "${USB_COUNT}" -gt 0 ]; then
+        echo ""
+        echo -e "  ${C_CYAN}╭─ INPUT REQUEST (STEP 1/2 — STANDARD BLACKLIST) ────────────────────╮${C_RESET}"
+        echo -e "  ${C_CYAN}│${C_RESET} • Enter device numbers to add or remove from the blacklist         ${C_CYAN}│${C_RESET}"
+        echo -e "  ${C_CYAN}│${C_RESET}   (separated by space or comma).                                   ${C_CYAN}│${C_RESET}"
+        echo -e "  ${C_CYAN}│${C_RESET} • Press ${C_WHITE}ENTER${C_RESET} without typing anything to leave the blacklist       ${C_CYAN}│${C_RESET}"
+        echo -e "  ${C_CYAN}│${C_RESET}   unchanged and proceed directly to ${C_MAGENTA}STEP 2 (Advanced Prot.)${C_RESET}.       ${C_CYAN}│${C_RESET}"
+        echo -e "  ${C_CYAN}╰────────────────────────────────────────────────────────────────────╯${C_RESET}"
+        printf "  ${C_YELLOW}❯ Blacklist selection [1-${USB_COUNT} or ENTER for Step 2]: ${C_RESET}"
+        read -r user_input
+
+        if [ -z "${user_input}" ]; then
+            echo ""
+            info "Standard blacklist unchanged — proceeding to Step 2."
+        else
+            local normalized_input
+            normalized_input=$(echo "${user_input}" | tr ',' ' ' | tr -s ' ')
+
+            local to_add=()
+            local to_add_descs=()
+            local to_remove=()
+
+            local num
+            for num in ${normalized_input}; do
+                if [[ ! "${num}" =~ ^[0-9]+$ ]]; then
+                    warn "Ignored invalid value: '${num}'"
+                    continue
+                fi
+
+                local idx=$(( num - 1 ))
+
+                if [ "${idx}" -lt 0 ] || [ "${idx}" -ge "${USB_COUNT}" ]; then
+                    warn "Ignored out-of-range number: ${num} (range: 1-${USB_COUNT})"
+                    continue
+                fi
+
+                local id="${USB_IDS[$idx]}"
+                local desc="${USB_DESCS[$idx]}"
+
+                if is_in_blacklist "${id}" "${current_blacklist}"; then
+                    to_remove+=("${id}")
+                else
+                    to_add+=("${id}")
+                    to_add_descs+=("${desc}")
+                fi
+            done
+
+            if [ "${#to_add[@]}" -eq 0 ] && [ "${#to_remove[@]}" -eq 0 ]; then
+                echo ""
+                warn "No valid changes for the blacklist."
+            else
+                section "Blacklist changes summary (Step 1/2)"
+
+                if [ "${#to_add[@]}" -gt 0 ]; then
+                    echo -e "  ${C_GREEN}To ADD to blacklist:${C_RESET}"
+                    local i
+                    for (( i=0; i<${#to_add[@]}; i++ )); do
+                        printf "    ${C_GREEN}+${C_RESET} ${C_CYAN}%-15s${C_RESET}  %s\n" "${to_add[$i]}" "${to_add_descs[$i]}"
+                    done
+                fi
+
+                if [ "${#to_remove[@]}" -gt 0 ]; then
+                    echo -e "  ${C_RED}To REMOVE from blacklist:${C_RESET}"
+                    local id
+                    for id in "${to_remove[@]}"; do
+                        local extra=""
+                        if is_in_advanced "${id}" "${current_advanced}"; then
+                            extra=" ${C_YELLOW}(will also remove Advanced Protection)${C_RESET}"
+                        fi
+                        printf "    ${C_RED}-${C_RESET} ${C_CYAN}%-15s${C_RESET}%b\n" "${id}" "${extra}"
+                    done
+                fi
+
+                echo ""
+                printf "  ${C_YELLOW}❯ Confirm changes to Blacklist? [y/N]: ${C_RESET}"
+                read -r confirm
+
+                if [[ "${confirm,,}" =~ ^(y|yes|s|si)$ ]]; then
+                    section "Applying Blacklist changes"
+
+                    local i
+                    for (( i=0; i<${#to_add[@]}; i++ )); do
+                        blacklist_add "${to_add[$i]}" "${to_add_descs[$i]}"
+                    done
+
+                    local removed_adv=0
+                    local id
+                    for id in "${to_remove[@]}"; do
+                        if is_in_advanced "${id}" "${current_advanced}"; then
+                            removed_adv=1
+                        fi
+                        blacklist_remove "${id}"
+                    done
+
+                    if [ "${removed_adv}" -eq 1 ]; then
+                        apply_udev_rules
+                    fi
+
+                    trigger_enforcement
+                else
+                    echo ""
+                    info "Blacklist changes cancelled."
+                fi
+            fi
+        fi
+    fi
+
+    # ── STEP 2 / 2 ───────────────────────────────────────────────────────────
+    interactive_advanced_step
+
+    # ── FINAL SUMMARY ────────────────────────────────────────────────────────
+    echo ""
+    echo -e "${C_GREEN}══════════════════════════════════════════════════════════════════════${C_RESET}"
+    local final_blacklist final_advanced
+    final_blacklist=$(read_blacklist)
+    final_advanced=$(read_advanced)
+    show_blacklist "${final_blacklist}" "${final_advanced}"
+
+    echo ""
+    info "Configuration completed."
+    echo ""
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NON-INTERACTIVE MODE
+# ─────────────────────────────────────────────────────────────────────────────
+
+cmd_list() {
+    local entries
+    entries=$(read_blacklist)
+
+    if [ -z "${entries}" ]; then
+        echo "(empty blacklist)"
+    else
+        echo "${entries}"
+    fi
+}
+
+cmd_add() {
+    local raw_id="${1}"
+    local id
+    id=$(validate_usb_id "${raw_id}") || exit 1
+
+    ensure_blacklist_file
+
+    local desc
+    desc=$(get_device_description "${id}")
+
+    blacklist_add "${id}" "${desc}"
+    trigger_enforcement
+}
+
+cmd_remove() {
+    local raw_id="${1}"
+    local id
+    id=$(validate_usb_id "${raw_id}") || exit 1
+
+    ensure_blacklist_file
+    local had_advanced=0
+    if is_in_advanced "${id}"; then
+        had_advanced=1
+    fi
+
+    blacklist_remove "${id}"
+
+    if [ "${had_advanced}" -eq 1 ]; then
+        apply_udev_rules
+    fi
+    trigger_enforcement
+}
+
+cmd_advanced_list() {
+    local entries
+    entries=$(read_advanced)
+
+    if [ -z "${entries}" ]; then
+        echo "(empty advanced protection)"
+    else
+        echo "${entries}"
+    fi
+}
+
+cmd_advanced_add() {
+    local raw_id="${1}"
+    local id
+    id=$(validate_usb_id "${raw_id}") || exit 1
+
+    ensure_blacklist_file
+    ensure_advanced_file
+
+    local desc
+    desc=$(get_device_description "${id}")
+
+    # Ensure device is in the main blacklist first
+    if ! is_in_blacklist "${id}"; then
+        info "${id} was not in blacklist: automatically adding to standard blacklist..."
+        blacklist_add "${id}" "${desc}"
+        trigger_enforcement
+    fi
+
+    advanced_add "${id}" "${desc}"
+    apply_udev_rules
+}
+
+cmd_advanced_remove() {
+    local raw_id="${1}"
+    local id
+    id=$(validate_usb_id "${raw_id}") || exit 1
+
+    ensure_advanced_file
+    advanced_remove "${id}"
+    apply_udev_rules
+
+    # Check if raw node is restored
+    local nodes
+    nodes=$(get_expected_raw_nodes "${id}")
+    if [ -n "${nodes}" ]; then
+        local node
+        while IFS= read -r node; do
+            [ -z "${node}" ] && continue
+            if [ -e "${node}" ]; then
+                info "Check ${id}: raw node ${node} successfully restored (unlocked)."
+            fi
+        done <<< "${nodes}"
+    fi
+}
+
+show_usage() {
+    cat <<EOF
+Usage: usb-blacklist-select-pve [OPTION]
+
+Without options: 2-step interactive wizard (Blacklist + Advanced Protection).
+
+Standard Blacklist options:
+  --list                         Show IDs currently in blacklist (one per line)
+  --add VENDOR:PRODUCT           Add a device to blacklist and trigger enforcement
+  --remove VENDOR:PRODUCT        Remove a device from blacklist (and from Advanced Protection)
+
+Advanced Protection options (Udev block for raw node /dev/bus/usb):
+  --advanced-list                Show IDs with active Advanced Protection (one per line)
+  --advanced-add VENDOR:PRODUCT  Enable Advanced Protection (auto-adds to blacklist if missing)
+  --advanced-remove VENDOR:PRODUCT Disable Advanced Protection while keeping device in blacklist
+
+Other options:
+  --help, -h                     Show this message
+
+Examples:
+  usb-blacklist-select-pve
+  usb-blacklist-select-pve --add 2e8a:0005
+  usb-blacklist-select-pve --advanced-add 0bda:0177
+  usb-blacklist-select-pve --advanced-remove 2e8a:0005
+  usb-blacklist-select-pve --remove 0bda:8156
+  usb-blacklist-select-pve --list
+  usb-blacklist-select-pve --advanced-list
+
+Configuration files:
+  Blacklist:           ${BLACKLIST_FILE}
+  Advanced Protection: ${ADVANCED_FILE}
+  Udev Rules:          ${UDEV_RULES_FILE}
+EOF
+}
+
+# ─────────────────────────────────────────────────────────────────────────────
+# MAIN
+# ─────────────────────────────────────────────────────────────────────────────
+
+main() {
+    check_root "$@"
+
+    case "${1:-}" in
+        --list)
+            cmd_list
+            ;;
+        --add)
+            if [ -z "${2:-}" ]; then
+                error "--add requires a VENDOR:PRODUCT argument"
+                exit 1
+            fi
+            cmd_add "${2}"
+            ;;
+        --remove)
+            if [ -z "${2:-}" ]; then
+                error "--remove requires a VENDOR:PRODUCT argument"
+                exit 1
+            fi
+            cmd_remove "${2}"
+            ;;
+        --advanced-list)
+            cmd_advanced_list
+            ;;
+        --advanced-add)
+            if [ -z "${2:-}" ]; then
+                error "--advanced-add requires a VENDOR:PRODUCT argument"
+                exit 1
+            fi
+            cmd_advanced_add "${2}"
+            ;;
+        --advanced-remove)
+            if [ -z "${2:-}" ]; then
+                error "--advanced-remove requires a VENDOR:PRODUCT argument"
+                exit 1
+            fi
+            cmd_advanced_remove "${2}"
+            ;;
+        --help|-h)
+            show_usage
+            ;;
+        "")
+            interactive_mode
+            ;;
+        *)
+            error "Unknown option: '${1}'"
+            show_usage
+            exit 1
+            ;;
+    esac
+}
+
+main "$@"

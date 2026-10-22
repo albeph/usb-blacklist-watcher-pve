@@ -100,12 +100,18 @@ sync_version() {
         exit 1
     fi
 
-    # Synchronize control files with VERSION
+    # Synchronize control and postinst files with VERSION
     if [ -f "${CONTROL_FILE}" ]; then
         sed -i -E "s/^Version:.*/Version: ${version}/" "${CONTROL_FILE}"
     fi
     if [ -f "${STAGING_DIR}/DEBIAN/control" ]; then
         sed -i -E "s/^Version:.*/Version: ${version}/" "${STAGING_DIR}/DEBIAN/control"
+    fi
+    if [ -f "${SRC_DIR}/DEBIAN/postinst" ]; then
+        sed -i -E "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${version}\"/" "${SRC_DIR}/DEBIAN/postinst"
+    fi
+    if [ -f "${STAGING_DIR}/DEBIAN/postinst" ]; then
+        sed -i -E "s/^PACKAGE_VERSION=.*/PACKAGE_VERSION=\"${version}\"/" "${STAGING_DIR}/DEBIAN/postinst"
     fi
     # Exclude VERSION from staging so it is not packaged into / of target system
     rm -f "${STAGING_DIR}/VERSION"
@@ -120,6 +126,7 @@ set_permissions() {
     section "Set permissions"
 
     # DEBIAN/ scripts must be executable
+    chmod 755 "${STAGING_DIR}/DEBIAN/preinst"
     chmod 755 "${STAGING_DIR}/DEBIAN/postinst"
     chmod 755 "${STAGING_DIR}/DEBIAN/prerm"
     chmod 755 "${STAGING_DIR}/DEBIAN/postrm"
@@ -127,12 +134,13 @@ set_permissions() {
 
     # Installable binaries
     chmod 755 "${STAGING_DIR}/usr/local/bin/usb-blacklist-watcher-pve"
-    chmod 755 "${STAGING_DIR}/usr/local/bin/usb-blacklist-select"
+    chmod 755 "${STAGING_DIR}/usr/local/bin/usb-blacklist-select-pve"
     info "usr/local/bin/ binaries: 755"
 
     # Default config
     chmod 644 "${STAGING_DIR}/etc/usb-blacklist-watcher-pve/blacklist.conf"
-    info "default blacklist.conf: 644 (postinst sets 600 post-install)"
+    chmod 644 "${STAGING_DIR}/etc/usb-blacklist-watcher-pve/advanced.conf"
+    info "default blacklist.conf and advanced.conf: 644 (postinst sets 600 post-install)"
 
     # Systemd unit
     chmod 644 "${STAGING_DIR}/etc/systemd/system/usb-blacklist-watcher-pve.service"

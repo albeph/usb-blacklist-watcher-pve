@@ -7,7 +7,7 @@
 # or stopped (static edit).
 #
 # The blacklist is reread from file on each enforcement: changes made via
-# usb-blacklist-select or edited manually take effect immediately without
+# usb-blacklist-select-pve or edited manually take effect immediately without
 # restarting the service.
 
 set -euo pipefail
@@ -26,7 +26,7 @@ readonly DEBOUNCE_SECONDS="0.3"
 
 log() {
     local level="${1}"; shift
-    echo "$(date '+%Y-%m-%d %H:%M:%S') [${level}] $*"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') [${level}] $*" >&2
 }
 
 log_info()  { log "INFO " "$*"; }
@@ -144,7 +144,7 @@ enforce_conf() {
 
     local key
     while IFS= read -r key; do
-        [ -z "${key}" ] && continue
+        [[ "${key}" =~ ^usb[0-9]+$ ]] || continue
 
         local current_value
         current_value=$(grep -iP "^${key}:" "${conf_file}" | head -1 | cut -d' ' -f2- || echo "?")

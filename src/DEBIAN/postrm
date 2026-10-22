@@ -4,6 +4,7 @@ set -euo pipefail
 
 BLACKLIST_DIR="/etc/usb-blacklist-watcher-pve"
 OLD_BLACKLIST_DIR="/etc/usb-blacklist-watcher"
+UDEV_RULES_FILE="/etc/udev/rules.d/99-usb-blacklist-watcher-pve.rules"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # UTILITIES
@@ -18,8 +19,15 @@ warn() { echo "  [usb-blacklist-watcher-pve] WARNING: $*" >&2; }
 
 case "${1:-}" in
     purge)
-        # Only on complete purge: remove configuration directory and blacklist.
-        # On simple "remove", the blacklist is preserved for future reinstallation.
+        # Only on complete purge: remove configuration directory, blacklist, and advanced protection.
+        # On simple "remove", the configuration is preserved for future reinstallation.
+        if [ -f "${UDEV_RULES_FILE}" ]; then
+            info "Purge: removing Udev rules ${UDEV_RULES_FILE}..."
+            rm -f "${UDEV_RULES_FILE}"
+            if command -v udevadm &>/dev/null; then
+                udevadm control --reload-rules && udevadm trigger --subsystem-match=usb || true
+            fi
+        fi
         if [ -d "${BLACKLIST_DIR}" ]; then
             info "Purge: removing configuration directory ${BLACKLIST_DIR}..."
             rm -rf "${BLACKLIST_DIR}"
@@ -35,7 +43,7 @@ case "${1:-}" in
         fi
         ;;
     remove)
-        # Simple remove: blacklist is preserved in ${BLACKLIST_DIR}.
+        # Simple remove: configuration is preserved in ${BLACKLIST_DIR}.
         # Reload daemon units after removing .service file.
         if command -v systemctl &>/dev/null; then
             systemctl daemon-reload || true
